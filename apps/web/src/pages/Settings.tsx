@@ -1,118 +1,369 @@
 import { useState } from 'react';
 import { useAuthStore } from '@/stores/auth';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { authApi } from '@/services/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { StorageBar } from '@/components/ui/StorageBar';
 import { useToast } from '@/components/ui/use-toast';
-import { formatBytes } from '@/utils';
+import { formatBytes, formatDate } from '@/utils';
+import { cn } from '@/utils';
+import {
+  User, Lock, Trash2, Server, Eye, EyeOff, AlertTriangle,
+  CheckCircle2, Copy, Globe,
+} from 'lucide-react';
 
 export default function Settings() {
-  const { user, updateUser } = useAuthStore();
+  const { user, updateUser, logout } = useAuthStore();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  // Profile
   const [name, setName] = useState(user?.name || '');
+
+  // Password
+  const [currentPw, setCurrentPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [showCurrentPw, setShowCurrentPw] = useState(false);
+  const [showNewPw, setShowNewPw] = useState(false);
+
+  // Delete account
+  const [deletePw, setDeletePw] = useState('');
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   const apiBase = import.meta.env.VITE_API_URL || '';
   const webdavUrl = `${apiBase}/dav`;
 
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      // Placeholder: extend API with a PATCH /api/auth/me endpoint later
-      return { name };
+  // ── Mutations ────────────────────────────────────────────────────────
+  const updateNameMutation = useMutation({
+    mutationFn: () => authApi.patchMe({ name: name.trim() || undefined }),
+    onSuccess: (res) => {
+      const updated = res.data.data;
+      if (updated) updateUser(updated);
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+      toast({ title: '昵称已更新' });
     },
-    onSuccess: (data) => {
-      updateUser({ name: data.name });
-      toast({ title: '保存成功', description: '个人信息已更新' });
-    },
-    onError: () => {
-      toast({ title: '保存失败', variant: 'destructive' });
-    },
+    onError: (e: any) => toast({ title: '更新失败', description: e.response?.data?.error?.message, variant: 'destructive' }),
   });
 
-  const storagePercent = user
-    ? Math.min(100, ((user.storageUsed || 0) / (user.storageQuota || 1)) * 100)
-    : 0;
+  const updatePasswordMutation = useMutation({
+    mutationFn: () => authApi.patchMe({ currentPassword: currentPw, newPassword: newPw }),
+    onSuccess: () => {
+      setCurrentPw(''); setNewPw(''); setConfirmPw('');
+      toast({ title: '密码已更新，请重新登录', variant: 'default' });
+      setTimeout(() => logout(), 1500);
+    },
+    onError: (e: any) => toast({ title: '修改密码失败', description: e.response?.data?.error?.message, variant: 'destructive' }),
+  });
+
+  const deleteAccountMutation = useMutation({
+    mutationFn: () => authApi.deleteMe(deletePw),
+    onSuccess: () => {
+      toast({ title: '账户已注销' });
+      logout();
+    },
+    onError: (e: any) => toast({ title: '注销失败', description: e.response?.data?.error?.message, variant: 'destructive' }),
+  });
+
+  // Password strength
+  const pwStrength = (pw: string): { level: 0 | 1 | 2 | 3; label: string; color: string } => {
+    if (!pw) return { level: 0, label: '', color: '' };
+    let score = 0;
+    if (pw.length >= 8) score++;
+    if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+    if (/[0-9]/.test(pw)) score++;
+    if (/[^A-Za-z0-9]/.test(pw)) score++;
+    if (score <= 1) return { level: 1, label: '弱', color: 'bg-red-500' };
+    if (score === 2) return { level: 2, label: '中', color: 'bg-amber-500' };
+    return { level: 3, label: '强', color: 'bg-emerald-500' };
+  };
+  const strength = pwStrength(newPw);
+  const pwMatch = newPw && confirmPw && newPw !== confirmPw;
+
+  const copyToClipboard = (text: string, msg: string) => {
+    navigator.clipboard.writeText(text).then(() => toast({ title: msg }));
+  };
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h1 className="text-2xl font-bold">设置</h1>
-        <p className="text-muted-foreground">管理您的账户设置</p>
+        <p className="text-muted-foreground text-sm mt-0.5">管理您的账户与偏好</p>
       </div>
 
+      {/* ── Profile ── */}
       <Card>
-        <CardHeader>
-          <CardTitle>个人信息</CardTitle>
-          <CardDescription>更新您的个人信息</CardDescription>
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+              <User className="h-4 w-4 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-base">个人信息</CardTitle>
+              <CardDescription>更新您的显示名称</CardDescription>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <label className="text-sm font-medium">邮箱</label>
-            <Input value={user?.email || ''} disabled />
+            <Input value={user?.email || ''} disabled className="bg-muted/50" />
           </div>
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <label className="text-sm font-medium">昵称</label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="输入昵称"
-            />
+            <div className="flex gap-2">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="输入昵称（留空则使用邮箱）"
+                onKeyDown={(e) => e.key === 'Enter' && updateNameMutation.mutate()}
+              />
+              <Button
+                onClick={() => updateNameMutation.mutate()}
+                disabled={updateNameMutation.isPending || name === (user?.name || '')}
+                size="sm"
+                className="flex-shrink-0"
+              >
+                {updateNameMutation.isPending ? '保存中…' : '保存'}
+              </Button>
+            </div>
           </div>
-          <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-            {saveMutation.isPending ? '保存中...' : '保存更改'}
+          <div className="text-xs text-muted-foreground">
+            注册于 {user?.createdAt ? formatDate(user.createdAt) : '—'}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Password ── */}
+      <Card>
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+              <Lock className="h-4 w-4 text-blue-500" />
+            </div>
+            <div>
+              <CardTitle className="text-base">修改密码</CardTitle>
+              <CardDescription>定期更换密码以保证账户安全</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">当前密码</label>
+            <div className="relative">
+              <Input
+                type={showCurrentPw ? 'text' : 'password'}
+                value={currentPw}
+                onChange={(e) => setCurrentPw(e.target.value)}
+                placeholder="输入当前密码"
+                className="pr-10"
+              />
+              <button
+                type="button"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                onClick={() => setShowCurrentPw((v) => !v)}
+              >
+                {showCurrentPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">新密码</label>
+            <div className="relative">
+              <Input
+                type={showNewPw ? 'text' : 'password'}
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                placeholder="至少 6 个字符"
+                className="pr-10"
+              />
+              <button
+                type="button"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                onClick={() => setShowNewPw((v) => !v)}
+              >
+                {showNewPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            {/* Strength bar */}
+            {newPw && (
+              <div className="space-y-1">
+                <div className="flex gap-1">
+                  {[1, 2, 3].map((lvl) => (
+                    <div
+                      key={lvl}
+                      className={cn(
+                        'h-1 flex-1 rounded-full transition-colors',
+                        strength.level >= lvl ? strength.color : 'bg-secondary'
+                      )}
+                    />
+                  ))}
+                </div>
+                <p className={cn('text-xs', strength.color.replace('bg-', 'text-'))}>
+                  密码强度：{strength.label}
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">确认新密码</label>
+            <Input
+              type="password"
+              value={confirmPw}
+              onChange={(e) => setConfirmPw(e.target.value)}
+              placeholder="再次输入新密码"
+              className={cn(pwMatch && 'border-red-500 focus-visible:ring-red-500')}
+            />
+            {pwMatch && (
+              <p className="text-xs text-red-500">两次输入的密码不一致</p>
+            )}
+            {newPw && confirmPw && !pwMatch && (
+              <p className="text-xs text-emerald-500 flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" /> 密码一致
+              </p>
+            )}
+          </div>
+
+          <Button
+            onClick={() => updatePasswordMutation.mutate()}
+            disabled={!currentPw || !newPw || !confirmPw || !!pwMatch || newPw.length < 6 || updatePasswordMutation.isPending}
+          >
+            {updatePasswordMutation.isPending ? '更新中…' : '更新密码'}
           </Button>
         </CardContent>
       </Card>
 
+      {/* ── Storage ── */}
       <Card>
-        <CardHeader>
-          <CardTitle>存储空间</CardTitle>
-          <CardDescription>查看您的存储使用情况</CardDescription>
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+              <Server className="h-4 w-4 text-emerald-500" />
+            </div>
+            <div>
+              <CardTitle className="text-base">存储空间</CardTitle>
+              <CardDescription>您当前的存储使用情况</CardDescription>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center justify-between text-sm">
-            <span>已使用</span>
-            <span className="font-medium">
-              {formatBytes(user?.storageUsed || 0)} / {formatBytes(user?.storageQuota || 0)}
-            </span>
+          <StorageBar
+            used={user?.storageUsed || 0}
+            quota={user?.storageQuota || 10737418240}
+          />
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="bg-muted/40 rounded-lg px-4 py-3">
+              <p className="text-muted-foreground text-xs mb-1">已使用</p>
+              <p className="font-semibold">{formatBytes(user?.storageUsed || 0)}</p>
+            </div>
+            <div className="bg-muted/40 rounded-lg px-4 py-3">
+              <p className="text-muted-foreground text-xs mb-1">总配额</p>
+              <p className="font-semibold">{formatBytes(user?.storageQuota || 0)}</p>
+            </div>
           </div>
-          <div className="h-2 bg-secondary rounded-full overflow-hidden">
-            <div
-              className="h-full bg-primary transition-all duration-300"
-              style={{ width: `${storagePercent}%` }}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">{storagePercent.toFixed(1)}% 已使用</p>
         </CardContent>
       </Card>
 
+      {/* ── WebDAV ── */}
       <Card>
-        <CardHeader>
-          <CardTitle>WebDAV 设置</CardTitle>
-          <CardDescription>使用 WebDAV 客户端（如 Finder、Windows 资源管理器）直接访问您的文件</CardDescription>
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center">
+              <Globe className="h-4 w-4 text-purple-500" />
+            </div>
+            <div>
+              <CardTitle className="text-base">WebDAV 访问</CardTitle>
+              <CardDescription>使用 WebDAV 客户端挂载文件系统</CardDescription>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <label className="text-sm font-medium">WebDAV 地址</label>
             <div className="flex gap-2">
-              <Input value={webdavUrl} readOnly className="font-mono text-sm" />
-              <Button
-                variant="outline"
-                onClick={() => {
-                  navigator.clipboard.writeText(webdavUrl);
-                  toast({ title: '已复制 WebDAV 地址' });
-                }}
-              >
-                复制
+              <Input value={webdavUrl} readOnly className="font-mono text-sm bg-muted/50" />
+              <Button variant="outline" size="icon" onClick={() => copyToClipboard(webdavUrl, '已复制 WebDAV 地址')}>
+                <Copy className="h-4 w-4" />
               </Button>
             </div>
           </div>
-          <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground space-y-1">
-            <p>• 用户名：您的登录邮箱</p>
-            <p>• 密码：您的登录密码</p>
-            <p>• 支持 macOS Finder、Windows 资源管理器、Cyberduck 等客户端</p>
+          <div className="rounded-lg bg-muted/40 p-4 space-y-1.5 text-sm text-muted-foreground">
+            <div className="flex items-center justify-between">
+              <span>用户名</span>
+              <div className="flex items-center gap-1">
+                <code className="text-foreground text-xs bg-muted px-1.5 py-0.5 rounded">{user?.email}</code>
+                <button onClick={() => copyToClipboard(user?.email || '', '已复制邮箱')}>
+                  <Copy className="h-3.5 w-3.5 hover:text-foreground transition-colors" />
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>密码</span>
+              <span className="text-xs">您的登录密码</span>
+            </div>
           </div>
+          <p className="text-xs text-muted-foreground">支持 macOS Finder、Windows 资源管理器、Cyberduck、Mountain Duck 等客户端</p>
+        </CardContent>
+      </Card>
+
+      {/* ── Danger zone ── */}
+      <Card className="border-red-500/30">
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center">
+              <AlertTriangle className="h-4 w-4 text-red-500" />
+            </div>
+            <div>
+              <CardTitle className="text-base text-red-500">危险区域</CardTitle>
+              <CardDescription>不可撤销的操作，请谨慎</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {!deleteConfirmOpen ? (
+            <div className="flex items-center justify-between p-4 border border-red-500/20 rounded-lg bg-red-500/5">
+              <div>
+                <p className="text-sm font-medium">注销账户</p>
+                <p className="text-xs text-muted-foreground mt-0.5">永久删除账户及所有文件，此操作不可撤销</p>
+              </div>
+              <Button variant="destructive" size="sm" onClick={() => setDeleteConfirmOpen(true)}>
+                <Trash2 className="h-4 w-4 mr-1.5" />
+                注销账户
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3 p-4 border border-red-500/30 rounded-lg bg-red-500/5">
+              <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                <p>此操作将永久删除您的账户、所有文件和分享链接，且不可恢复。请输入密码确认。</p>
+              </div>
+              <Input
+                type="password"
+                placeholder="输入密码确认注销"
+                value={deletePw}
+                onChange={(e) => setDeletePw(e.target.value)}
+                className="border-red-500/50 focus-visible:ring-red-500"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => { setDeleteConfirmOpen(false); setDeletePw(''); }}>
+                  取消
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={!deletePw || deleteAccountMutation.isPending}
+                  onClick={() => deleteAccountMutation.mutate()}
+                >
+                  {deleteAccountMutation.isPending ? '注销中…' : '确认永久注销'}
+                </Button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

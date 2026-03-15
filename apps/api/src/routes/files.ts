@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { eq, and, isNull, like } from 'drizzle-orm';
+import { eq, and, isNull, isNotNull, like } from 'drizzle-orm';
 import { getDb, files, users } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { ERROR_CODES, MAX_FILE_SIZE } from '@r2shelf/shared';
@@ -18,9 +18,13 @@ const updateFileSchema = z.object({
   parentId: z.string().nullable().optional(),
 });
 
+const moveFileSchema = z.object({
+  targetParentId: z.string().nullable(),
+});
+
 app.use('*', authMiddleware);
 
-// ── Upload must be registered BEFORE /:id ─────────────────────────────────
+// ── Upload ────────────────────────────────────────────────────────────────
 app.post('/upload', async (c) => {
   const userId = c.get('userId')!;
   const contentType = c.req.header('Content-Type') || '';
@@ -37,12 +41,8 @@ app.post('/upload', async (c) => {
   const parentId = formData.get('parentId') as string | null;
 
   if (!uploadFile) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '请选择要上传的文件' } },
-      400,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '请选择要上传的文件' } }, 400);
   }
-
   if (uploadFile.size > MAX_FILE_SIZE) {
     return c.json(
       { success: false, error: { code: ERROR_CODES.FILE_TOO_LARGE, message: `文件大小超过限制（最大 ${MAX_FILE_SIZE / 1024 / 1024 / 1024}GB）` } },
@@ -54,14 +54,12 @@ app.post('/upload', async (c) => {
   const user = await db.select().from(users).where(eq(users.id, userId)).get();
 
   if (user && user.storageUsed + uploadFile.size > user.storageQuota) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.STORAGE_EXCEEDED, message: '存储空间不足' } },
-      400,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.STORAGE_EXCEEDED, message: '存储空间不足' } }, 400);
   }
 
   const fileId = crypto.randomUUID();
   const now = new Date().toISOString();
+  // r2Key uses userId + fileId for isolation; supports same-name files
   const r2Key = `files/${userId}/${fileId}/${uploadFile.name}`;
   const path = parentId ? `${parentId}/${uploadFile.name}` : `/${uploadFile.name}`;
 
@@ -71,19 +69,10 @@ app.post('/upload', async (c) => {
   });
 
   await db.insert(files).values({
-    id: fileId,
-    userId,
-    parentId: parentId || null,
-    name: uploadFile.name,
-    path,
-    type: 'file',
-    size: uploadFile.size,
-    r2Key,
-    mimeType: uploadFile.type || null,
-    hash: null,
-    isFolder: false,
-    createdAt: now,
-    updatedAt: now,
+    id: fileId, userId, parentId: parentId || null, name: uploadFile.name,
+    path, type: 'file', size: uploadFile.size, r2Key,
+    mimeType: uploadFile.type || null, hash: null, isFolder: false,
+    createdAt: now, updatedAt: now, deletedAt: null,
   });
 
   if (user) {
@@ -98,7 +87,7 @@ app.post('/upload', async (c) => {
   });
 });
 
-// ── List files ────────────────────────────────────────────────────────────
+// ── List files (active only) ──────────────────────────────────────────────
 app.get('/', async (c) => {
   const userId = c.get('userId')!;
   const parentId = c.req.query('parentId') || null;
@@ -107,8 +96,8 @@ app.get('/', async (c) => {
   const sortOrder = c.req.query('sortOrder') || 'desc';
 
   const db = getDb(c.env.DB);
+  const conditions = [eq(files.userId, userId), isNull(files.deletedAt)];
 
-  const conditions = [eq(files.userId, userId)];
   if (parentId) {
     conditions.push(eq(files.parentId, parentId));
   } else {
@@ -119,7 +108,6 @@ app.get('/', async (c) => {
   }
 
   const items = await db.select().from(files).where(and(...conditions)).all();
-
   const sorted = [...items].sort((a, b) => {
     const aVal = a[sortBy] ?? '';
     const bVal = b[sortBy] ?? '';
@@ -128,6 +116,96 @@ app.get('/', async (c) => {
   });
 
   return c.json({ success: true, data: sorted });
+});
+
+// ── Trash: list deleted files ─────────────────────────────────────────────
+app.get('/trash', async (c) => {
+  const userId = c.get('userId')!;
+  const db = getDb(c.env.DB);
+
+  const items = await db.select().from(files)
+    .where(and(eq(files.userId, userId), isNotNull(files.deletedAt)))
+    .all();
+
+  // Sort by deletedAt desc
+  const sorted = [...items].sort((a, b) =>
+    (b.deletedAt ?? '') > (a.deletedAt ?? '') ? 1 : -1
+  );
+
+  return c.json({ success: true, data: sorted });
+});
+
+// ── Trash: restore a file ─────────────────────────────────────────────────
+app.post('/trash/:id/restore', async (c) => {
+  const userId = c.get('userId')!;
+  const fileId = c.req.param('id');
+  const db = getDb(c.env.DB);
+
+  const file = await db.select().from(files)
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNotNull(files.deletedAt))).get();
+
+  if (!file) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在或未被删除' } }, 404);
+  }
+
+  const now = new Date().toISOString();
+  await db.update(files).set({ deletedAt: null, updatedAt: now }).where(eq(files.id, fileId));
+
+  return c.json({ success: true, data: { message: '已恢复' } });
+});
+
+// ── Trash: permanently delete a file ─────────────────────────────────────
+app.delete('/trash/:id', async (c) => {
+  const userId = c.get('userId')!;
+  const fileId = c.req.param('id');
+  const db = getDb(c.env.DB);
+
+  const file = await db.select().from(files)
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNotNull(files.deletedAt))).get();
+
+  if (!file) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
+  }
+
+  if (!file.isFolder) {
+    await c.env.FILES.delete(file.r2Key);
+    const user = await db.select().from(users).where(eq(users.id, userId)).get();
+    if (user) {
+      await db.update(users)
+        .set({ storageUsed: Math.max(0, user.storageUsed - file.size), updatedAt: new Date().toISOString() })
+        .where(eq(users.id, userId));
+    }
+  }
+
+  await db.delete(files).where(eq(files.id, fileId));
+  return c.json({ success: true, data: { message: '已永久删除' } });
+});
+
+// ── Trash: empty (permanently delete all trashed files) ───────────────────
+app.delete('/trash', async (c) => {
+  const userId = c.get('userId')!;
+  const db = getDb(c.env.DB);
+
+  const trashed = await db.select().from(files)
+    .where(and(eq(files.userId, userId), isNotNull(files.deletedAt))).all();
+
+  let freedBytes = 0;
+  for (const file of trashed) {
+    if (!file.isFolder) {
+      await c.env.FILES.delete(file.r2Key);
+      freedBytes += file.size;
+    }
+    await db.delete(files).where(eq(files.id, file.id));
+  }
+
+  const user = await db.select().from(users).where(eq(users.id, userId)).get();
+  if (user && freedBytes > 0) {
+    await db.update(users)
+      .set({ storageUsed: Math.max(0, user.storageUsed - freedBytes), updatedAt: new Date().toISOString() })
+      .where(eq(users.id, userId));
+  }
+
+  return c.json({ success: true, data: { message: `已清空回收站，释放 ${trashed.length} 个文件` } });
 });
 
 // ── Create folder ─────────────────────────────────────────────────────────
@@ -148,31 +226,25 @@ app.post('/', async (c) => {
 
   const existing = await db.select().from(files)
     .where(and(
-      eq(files.userId, userId),
-      eq(files.name, name),
+      eq(files.userId, userId), eq(files.name, name),
       parentId ? eq(files.parentId, parentId) : isNull(files.parentId),
-      eq(files.isFolder, true),
+      eq(files.isFolder, true), isNull(files.deletedAt),
     )).get();
 
   if (existing) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '同名文件夹已存在' } },
-      400,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '同名文件夹已存在' } }, 400);
   }
 
   const folderId = crypto.randomUUID();
   const now = new Date().toISOString();
   const path = parentId ? `${parentId}/${name}` : `/${name}`;
-
   const newFolder = {
     id: folderId, userId, parentId: parentId || null, name, path,
     type: 'folder', size: 0, r2Key: `folders/${folderId}`,
-    mimeType: null, hash: null, isFolder: true, createdAt: now, updatedAt: now,
+    mimeType: null, hash: null, isFolder: true, createdAt: now, updatedAt: now, deletedAt: null,
   };
 
   await db.insert(files).values(newFolder);
-
   return c.json({ success: true, data: newFolder });
 });
 
@@ -186,16 +258,13 @@ app.get('/:id', async (c) => {
     .where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
 
   if (!file) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } },
-      404,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   }
 
   return c.json({ success: true, data: file });
 });
 
-// ── Update file/folder ────────────────────────────────────────────────────
+// ── Update file/folder (rename) ───────────────────────────────────────────
 app.put('/:id', async (c) => {
   const userId = c.get('userId')!;
   const fileId = c.req.param('id');
@@ -214,10 +283,7 @@ app.put('/:id', async (c) => {
     .where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
 
   if (!file) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } },
-      404,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   }
 
   const { name, parentId } = result.data;
@@ -230,7 +296,6 @@ app.put('/:id', async (c) => {
       ? (parentId ? `${parentId}/${name}` : `/${name}`)
       : (file.parentId ? `${file.parentId}/${name}` : `/${name}`);
   }
-
   if (parentId !== undefined) {
     updateData.parentId = parentId || null;
     const effectiveName = (name as string | undefined) || file.name;
@@ -238,40 +303,105 @@ app.put('/:id', async (c) => {
   }
 
   await db.update(files).set(updateData).where(eq(files.id, fileId));
-
   return c.json({ success: true, data: { message: '更新成功' } });
 });
 
-// ── Delete file/folder ────────────────────────────────────────────────────
+// ── Move file/folder ──────────────────────────────────────────────────────
+app.post('/:id/move', async (c) => {
+  const userId = c.get('userId')!;
+  const fileId = c.req.param('id');
+  const body = await c.req.json();
+  const result = moveFileSchema.safeParse(body);
+
+  if (!result.success) {
+    return c.json(
+      { success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: result.error.errors[0].message } },
+      400,
+    );
+  }
+
+  const { targetParentId } = result.data;
+  const db = getDb(c.env.DB);
+
+  const file = await db.select().from(files)
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
+
+  if (!file) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
+  }
+
+  // Prevent moving a folder into itself or its descendants
+  if (file.isFolder && targetParentId) {
+    let checkId: string | null = targetParentId;
+    while (checkId) {
+      if (checkId === fileId) {
+        return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '不能将文件夹移动到自身或其子文件夹中' } }, 400);
+      }
+      const parent = await db.select().from(files).where(eq(files.id, checkId)).get();
+      checkId = parent?.parentId ?? null;
+    }
+  }
+
+  // Check name collision at destination
+  const conflict = await db.select().from(files)
+    .where(and(
+      eq(files.userId, userId),
+      eq(files.name, file.name),
+      targetParentId ? eq(files.parentId, targetParentId) : isNull(files.parentId),
+      isNull(files.deletedAt),
+    )).get();
+
+  if (conflict && conflict.id !== fileId) {
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '目标位置已存在同名文件' } }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const newPath = targetParentId ? `${targetParentId}/${file.name}` : `/${file.name}`;
+
+  await db.update(files)
+    .set({ parentId: targetParentId, path: newPath, updatedAt: now })
+    .where(eq(files.id, fileId));
+
+  return c.json({ success: true, data: { message: '移动成功' } });
+});
+
+// ── Soft delete ───────────────────────────────────────────────────────────
 app.delete('/:id', async (c) => {
   const userId = c.get('userId')!;
   const fileId = c.req.param('id');
   const db = getDb(c.env.DB);
 
   const file = await db.select().from(files)
-    .where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
 
   if (!file) {
-    return c.json(
-      { success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } },
-      404,
-    );
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   }
 
-  if (!file.isFolder) {
-    await c.env.FILES.delete(file.r2Key);
-    const user = await db.select().from(users).where(eq(users.id, userId)).get();
-    if (user) {
-      await db.update(users)
-        .set({ storageUsed: Math.max(0, user.storageUsed - file.size), updatedAt: new Date().toISOString() })
-        .where(eq(users.id, userId));
-    }
+  const now = new Date().toISOString();
+
+  if (file.isFolder) {
+    // Recursively soft-delete all children
+    await softDeleteFolder(db, fileId, now);
   }
 
-  await db.delete(files).where(eq(files.id, fileId));
+  await db.update(files).set({ deletedAt: now, updatedAt: now }).where(eq(files.id, fileId));
 
-  return c.json({ success: true, data: { message: '删除成功' } });
+  return c.json({ success: true, data: { message: '已移入回收站' } });
 });
+
+/** Recursively soft-delete all descendants of a folder */
+async function softDeleteFolder(db: ReturnType<typeof import('../db').getDb>, folderId: string, now: string) {
+  const children = await db.select().from(files)
+    .where(and(eq(files.parentId, folderId), isNull(files.deletedAt))).all();
+
+  for (const child of children) {
+    if (child.isFolder) {
+      await softDeleteFolder(db, child.id, now);
+    }
+    await db.update(files).set({ deletedAt: now, updatedAt: now }).where(eq(files.id, child.id));
+  }
+}
 
 // ── Download ──────────────────────────────────────────────────────────────
 app.get('/:id/download', async (c) => {
@@ -280,7 +410,7 @@ app.get('/:id/download', async (c) => {
   const db = getDb(c.env.DB);
 
   const file = await db.select().from(files)
-    .where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
 
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   if (file.isFolder) return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '无法下载文件夹' } }, 400);
@@ -299,21 +429,35 @@ app.get('/:id/download', async (c) => {
 
 // ── Preview ───────────────────────────────────────────────────────────────
 app.get('/:id/preview', async (c) => {
-  const userId = c.get('userId')!;
+  let userId = c.get('userId');
+
+  if (!userId) {
+    const queryToken = c.req.query('token');
+    if (queryToken) {
+      try {
+        const { verifyJWT } = await import('../lib/crypto');
+        const payload = await verifyJWT(queryToken, c.env.JWT_SECRET);
+        const session = await c.env.KV.get(`session:${queryToken}`);
+        if (session && payload?.userId) userId = payload.userId;
+      } catch { /* ignore */ }
+    }
+    if (!userId) {
+      return c.json({ success: false, error: { code: ERROR_CODES.UNAUTHORIZED, message: '未授权' } }, 401);
+    }
+  }
+
   const fileId = c.req.param('id');
   const db = getDb(c.env.DB);
 
   const file = await db.select().from(files)
-    .where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
+    .where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
 
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   if (file.isFolder) return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '无法预览文件夹' } }, 400);
 
   const previewable =
-    file.mimeType?.startsWith('image/') ||
-    file.mimeType?.startsWith('video/') ||
-    file.mimeType?.startsWith('audio/') ||
-    file.mimeType === 'application/pdf' ||
+    file.mimeType?.startsWith('image/') || file.mimeType?.startsWith('video/') ||
+    file.mimeType?.startsWith('audio/') || file.mimeType === 'application/pdf' ||
     file.mimeType?.startsWith('text/');
 
   if (!previewable) {

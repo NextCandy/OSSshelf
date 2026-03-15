@@ -26,6 +26,8 @@ export const files = sqliteTable('files', {
   isFolder: integer('is_folder', { mode: 'boolean' }).default(false).notNull(),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+  // Soft delete: null = active, ISO timestamp = deleted
+  deletedAt: text('deleted_at'),
 });
 
 export const shares = sqliteTable('shares', {
