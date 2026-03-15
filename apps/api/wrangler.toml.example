@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "r2shelf-db"
-database_id = ""
+database_id = "YOUR_D1_DATABASE_ID"
 
 [[r2_buckets]]
 binding = "FILES"
@@ -14,8 +14,11 @@ bucket_name = "r2shelf-files"
 
 [[kv_namespaces]]
 binding = "KV"
-id = ""
+id = "YOUR_KV_NAMESPACE_ID"
 
 [vars]
 ENVIRONMENT = "development"
 JWT_SECRET = "your-jwt-secret-change-in-production"
+
+[env.production]
+vars = { ENVIRONMENT = "production", JWT_SECRET = "YOUR_JWT_SECRET" }
