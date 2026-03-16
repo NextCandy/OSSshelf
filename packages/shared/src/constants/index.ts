@@ -3,9 +3,9 @@ export const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;
 export const DEFAULT_STORAGE_QUOTA = 10 * 1024 * 1024 * 1024;
 
 export const ALLOWED_MIME_TYPES: Record<string, string[]> = {
-  image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'],
-  video: ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'],
-  audio: ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/aac'],
+  image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp', 'image/tiff'],
+  video: ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska'],
+  audio: ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/aac', 'audio/flac', 'audio/x-m4a'],
   document: [
     'application/pdf',
     'application/msword',
@@ -15,8 +15,9 @@ export const ALLOWED_MIME_TYPES: Record<string, string[]> = {
     'application/vnd.ms-powerpoint',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   ],
-  text: ['text/plain', 'text/html', 'text/css', 'text/javascript', 'text/markdown'],
-  code: ['application/json', 'application/xml', 'application/x-yaml'],
+  text: ['text/plain', 'text/html', 'text/css', 'text/javascript', 'text/markdown', 'text/csv'],
+  code: ['application/json', 'application/xml', 'application/x-yaml', 'application/x-sh'],
+  archive: ['application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed', 'application/x-tar', 'application/gzip'],
 };
 
 export const FILE_TYPE_ICONS: Record<string, string> = {
@@ -37,10 +38,76 @@ export const SHARE_DEFAULT_EXPIRY = 7 * 24 * 60 * 60 * 1000;
 
 export const UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024;
 
+export const MULTIPART_THRESHOLD = 100 * 1024 * 1024;
+
+export const MAX_CONCURRENT_PARTS = 3;
+
 export const THUMBNAIL_SIZES = {
   small: 128,
   medium: 256,
   large: 512,
+};
+
+export const TRASH_RETENTION_DAYS = 30;
+
+export const LOGIN_MAX_ATTEMPTS = 5;
+
+export const LOGIN_LOCKOUT_DURATION = 15 * 60 * 1000;
+
+export const DEVICE_SESSION_EXPIRY = 30 * 24 * 60 * 60 * 1000;
+
+export const UPLOAD_TASK_EXPIRY = 24 * 60 * 60 * 1000;
+
+export const PREVIEWABLE_MIME_TYPES = [
+  'image/',
+  'video/',
+  'audio/',
+  'application/pdf',
+  'text/',
+  'application/json',
+  'application/xml',
+];
+
+export const CODE_HIGHLIGHT_EXTENSIONS: Record<string, string> = {
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.py': 'python',
+  '.rb': 'ruby',
+  '.go': 'go',
+  '.rs': 'rust',
+  '.java': 'java',
+  '.c': 'c',
+  '.cpp': 'cpp',
+  '.h': 'c',
+  '.hpp': 'cpp',
+  '.cs': 'csharp',
+  '.php': 'php',
+  '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.scala': 'scala',
+  '.r': 'r',
+  '.sql': 'sql',
+  '.sh': 'bash',
+  '.bash': 'bash',
+  '.zsh': 'bash',
+  '.json': 'json',
+  '.xml': 'xml',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.toml': 'toml',
+  '.ini': 'ini',
+  '.md': 'markdown',
+  '.markdown': 'markdown',
+  '.html': 'html',
+  '.htm': 'html',
+  '.css': 'css',
+  '.scss': 'scss',
+  '.sass': 'sass',
+  '.less': 'less',
+  '.vue': 'vue',
+  '.svelte': 'svelte',
 };
 
 export const API_ROUTES = {
@@ -49,6 +116,8 @@ export const API_ROUTES = {
     LOGIN: '/api/auth/login',
     LOGOUT: '/api/auth/logout',
     ME: '/api/auth/me',
+    DEVICES: '/api/auth/devices',
+    SESSIONS: '/api/auth/sessions',
   },
   FILES: {
     LIST: '/api/files',
@@ -59,11 +128,18 @@ export const API_ROUTES = {
     UPLOAD: '/api/files/upload',
     DOWNLOAD: (id: string) => `/api/files/${id}/download`,
     PREVIEW: (id: string) => `/api/files/${id}/preview`,
+    BATCH: '/api/files/batch',
+    SEARCH: '/api/files/search',
+    TAGS: '/api/files/tags',
   },
   SHARE: {
     CREATE: '/api/share',
     GET: (id: string) => `/api/share/${id}`,
     DOWNLOAD: (id: string) => `/api/share/${id}/download`,
+  },
+  TASKS: {
+    UPLOAD: '/api/tasks/upload',
+    DOWNLOAD: '/api/tasks/download',
   },
   WEBDAV: '/dav',
 } as const;
@@ -81,4 +157,51 @@ export const ERROR_CODES = {
   SHARE_PASSWORD_INVALID: 'SHARE_PASSWORD_INVALID',
   SHARE_DOWNLOAD_LIMIT_EXCEEDED: 'SHARE_DOWNLOAD_LIMIT_EXCEEDED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  LOGIN_LOCKED: 'LOGIN_LOCKED',
+  DEVICE_LIMIT_EXCEEDED: 'DEVICE_LIMIT_EXCEEDED',
+  PERMISSION_DENIED: 'PERMISSION_DENIED',
+  TASK_NOT_FOUND: 'TASK_NOT_FOUND',
+  TASK_EXPIRED: 'TASK_EXPIRED',
+  INVALID_URL: 'INVALID_URL',
 } as const;
+
+export const AUDIT_ACTIONS = {
+  USER_LOGIN: 'user.login',
+  USER_LOGOUT: 'user.logout',
+  USER_REGISTER: 'user.register',
+  USER_UPDATE: 'user.update',
+  USER_DELETE: 'user.delete',
+  FILE_UPLOAD: 'file.upload',
+  FILE_DOWNLOAD: 'file.download',
+  FILE_DELETE: 'file.delete',
+  FILE_MOVE: 'file.move',
+  FILE_RENAME: 'file.rename',
+  FOLDER_CREATE: 'folder.create',
+  SHARE_CREATE: 'share.create',
+  SHARE_ACCESS: 'share.access',
+  BUCKET_CREATE: 'bucket.create',
+  BUCKET_UPDATE: 'bucket.update',
+  BUCKET_DELETE: 'bucket.delete',
+  ADMIN_USER_UPDATE: 'admin.user_update',
+  ADMIN_CONFIG_CHANGE: 'admin.config_change',
+} as const;
+
+export const TAG_COLORS = [
+  '#ef4444',
+  '#f97316',
+  '#f59e0b',
+  '#eab308',
+  '#84cc16',
+  '#22c55e',
+  '#10b981',
+  '#14b8a6',
+  '#06b6d4',
+  '#0ea5e9',
+  '#3b82f6',
+  '#6366f1',
+  '#8b5cf6',
+  '#a855f7',
+  '#d946ef',
+  '#ec4899',
+  '#f43f5e',
+];

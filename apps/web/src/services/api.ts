@@ -10,6 +10,13 @@ import type {
   AuthResponse,
   FileListParams,
   ShareCreateParams,
+  UploadTask,
+  DownloadTask,
+  BatchOperationResult,
+  FileSearchResult,
+  FileTag,
+  UserDevice,
+  AuditLog,
 } from '@osshelf/shared';
 
 const api = axios.create({
@@ -37,7 +44,6 @@ api.interceptors.response.use(
   }
 );
 
-// ── Auth ──────────────────────────────────────────────────────────────────
 export const authApi = {
   login: (params: AuthLoginParams) =>
     api.post<ApiResponse<AuthResponse>>('/api/auth/login', params),
@@ -55,6 +61,10 @@ export const authApi = {
     api.get<ApiResponse<DashboardStats>>('/api/auth/stats'),
   getRegistrationConfig: () =>
     api.get<ApiResponse<{ open: boolean; requireInviteCode: boolean }>>('/api/auth/registration-config'),
+  devices: () =>
+    api.get<ApiResponse<UserDevice[]>>('/api/auth/devices'),
+  deleteDevice: (deviceId: string) =>
+    api.delete<ApiResponse<{ message: string }>>(`/api/auth/devices/${deviceId}`),
 };
 
 export interface BucketStats {
@@ -78,7 +88,6 @@ export interface DashboardStats {
   bucketBreakdown: BucketStats[];
 }
 
-// ── Files ─────────────────────────────────────────────────────────────────
 export const filesApi = {
   list: (params?: Partial<FileListParams>) =>
     api.get<ApiResponse<FileItem[]>>('/api/files', { params }),
@@ -114,7 +123,6 @@ export const filesApi = {
   downloadUrl: (id: string) =>
     `${import.meta.env.VITE_API_URL || ''}/api/files/${id}/download`,
 
-  // Trash
   listTrash: () =>
     api.get<ApiResponse<FileItem[]>>('/api/files/trash'),
   restoreTrash: (id: string) =>
@@ -125,7 +133,6 @@ export const filesApi = {
     api.delete<ApiResponse<{ message: string }>>('/api/files/trash'),
 };
 
-// ── Share ─────────────────────────────────────────────────────────────────
 export const shareApi = {
   create: (params: ShareCreateParams) =>
     api.post<ApiResponse<Share>>('/api/share', params),
@@ -143,9 +150,6 @@ export const shareApi = {
     }`,
 };
 
-export default api;
-
-// ── Buckets ───────────────────────────────────────────────────────────────
 export interface StorageBucket {
   id: string;
   userId: string;
@@ -154,7 +158,7 @@ export interface StorageBucket {
   bucketName: string;
   endpoint: string | null;
   region: string | null;
-  accessKeyId: string;    // Masked on backend
+  accessKeyId: string;
   secretAccessKeyMasked: string;
   pathStyle: boolean;
   isDefault: boolean;
@@ -264,8 +268,6 @@ export const bucketsApi = {
     api.delete<ApiResponse<{ message: string }>>(`/api/buckets/${id}`),
 };
 
-// ── Admin ─────────────────────────────────────────────────────────────────
-
 export interface AdminUser {
   id: string;
   email: string;
@@ -317,9 +319,11 @@ export const adminApi = {
 
   stats: () =>
     api.get<ApiResponse<AdminStats>>('/api/admin/stats'),
+
+  auditLogs: (params?: { userId?: string; action?: string; page?: number; limit?: number }) =>
+    api.get<ApiResponse<{ items: AuditLog[]; total: number; page: number; limit: number }>>('/api/admin/audit-logs', { params }),
 };
 
-// ── Presign ───────────────────────────────────────────────────────────────
 export interface PresignUploadResponse {
   useProxy?: boolean;
   uploadUrl?: string;
@@ -382,3 +386,139 @@ export interface UploadedFile {
   bucketId: string | null;
   createdAt: string;
 }
+
+export const tasksApi = {
+  create: (data: { fileName: string; fileSize: number; mimeType?: string; parentId?: string | null; bucketId?: string | null }) =>
+    api.post<ApiResponse<{ taskId: string; uploadId: string; r2Key: string; bucketId: string; totalParts: number; firstPartUrl: string }>>('/api/tasks/create', data),
+  get: (taskId: string) =>
+    api.get<ApiResponse<UploadTask>>(`/api/tasks/${taskId}`),
+  part: (data: { taskId: string; partNumber: number }) =>
+    api.post<ApiResponse<{ partUrl: string; partNumber: number; expiresIn: number }>>('/api/tasks/part', data),
+  partProxy: (formData: FormData) =>
+    api.post<ApiResponse<{ partNumber: number; etag: string }>>('/api/tasks/part-proxy', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  complete: (data: { taskId: string; parts: Array<{ partNumber: number; etag: string }> }) =>
+    api.post<ApiResponse<UploadedFile>>('/api/tasks/complete', data),
+  abort: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>('/api/tasks/abort', { taskId }),
+  list: () =>
+    api.get<ApiResponse<UploadTask[]>>('/api/tasks/list'),
+  delete: (taskId: string) =>
+    api.delete<ApiResponse<{ message: string }>>(`/api/tasks/${taskId}`),
+};
+
+export const downloadsApi = {
+  create: (data: { url: string; fileName?: string; parentId?: string | null; bucketId?: string | null }) =>
+    api.post<ApiResponse<{ id: string; url: string; fileName: string; status: string }>>('/api/downloads/create', data),
+  list: (params?: { status?: string; page?: number; limit?: number }) =>
+    api.get<ApiResponse<{ items: DownloadTask[]; total: number; page: number; limit: number }>>('/api/downloads/list', { params }),
+  get: (taskId: string) =>
+    api.get<ApiResponse<DownloadTask>>(`/api/downloads/${taskId}`),
+  update: (taskId: string, data: { fileName?: string; parentId?: string | null; bucketId?: string | null }) =>
+    api.patch<ApiResponse<DownloadTask>>(`/api/downloads/${taskId}`, data),
+  delete: (taskId: string) =>
+    api.delete<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}`),
+  retry: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}/retry`),
+  clearCompleted: () =>
+    api.delete<ApiResponse<{ message: string; count: number }>>('/api/downloads/completed'),
+  clearFailed: () =>
+    api.delete<ApiResponse<{ message: string; count: number }>>('/api/downloads/failed'),
+};
+
+export const batchApi = {
+  delete: (fileIds: string[]) =>
+    api.post<ApiResponse<BatchOperationResult>>('/api/batch/delete', { fileIds }),
+  move: (fileIds: string[], targetParentId: string | null) =>
+    api.post<ApiResponse<BatchOperationResult>>('/api/batch/move', { fileIds, targetParentId }),
+  copy: (fileIds: string[], targetParentId: string | null, targetBucketId?: string | null) =>
+    api.post<ApiResponse<BatchOperationResult>>('/api/batch/copy', { fileIds, targetParentId, targetBucketId }),
+  rename: (items: Array<{ fileId: string; newName: string }>) =>
+    api.post<ApiResponse<BatchOperationResult>>('/api/batch/rename', { items }),
+  permanentDelete: (fileIds: string[]) =>
+    api.post<ApiResponse<BatchOperationResult & { freedBytes: number }>>('/api/batch/permanent-delete', { fileIds }),
+  restore: (fileIds: string[]) =>
+    api.post<ApiResponse<BatchOperationResult>>('/api/batch/restore', { fileIds }),
+};
+
+export const searchApi = {
+  query: (params: {
+    query?: string;
+    parentId?: string;
+    tags?: string[];
+    mimeType?: string;
+    minSize?: number;
+    maxSize?: number;
+    createdAfter?: string;
+    createdBefore?: string;
+    updatedAfter?: string;
+    updatedBefore?: string;
+    isFolder?: boolean;
+    bucketId?: string;
+    sortBy?: 'name' | 'size' | 'createdAt' | 'updatedAt';
+    sortOrder?: 'asc' | 'desc';
+    page?: number;
+    limit?: number;
+  }) =>
+    api.get<ApiResponse<FileSearchResult>>('/api/search', { params }),
+  advanced: (data: {
+    conditions: Array<{
+      field: 'name' | 'mimeType' | 'size' | 'createdAt' | 'updatedAt' | 'tags';
+      operator: 'contains' | 'equals' | 'startsWith' | 'endsWith' | 'gt' | 'gte' | 'lt' | 'lte' | 'in';
+      value: string | number | string[];
+    }>;
+    logic?: 'and' | 'or';
+    sortBy?: 'name' | 'size' | 'createdAt' | 'updatedAt';
+    sortOrder?: 'asc' | 'desc';
+    page?: number;
+    limit?: number;
+  }) =>
+    api.post<ApiResponse<{ items: FileItem[]; total: number; page: number; limit: number; totalPages: number }>>('/api/search/advanced', data),
+  suggestions: (params: { q: string; type: 'name' | 'tags' | 'mime' }) =>
+    api.get<ApiResponse<string[]>>('/api/search/suggestions', { params }),
+};
+
+export const permissionsApi = {
+  grant: (data: { fileId: string; userId: string; permission: 'read' | 'write' | 'admin' }) =>
+    api.post<ApiResponse<{ message: string }>>('/api/permissions/grant', data),
+  revoke: (data: { fileId: string; userId: string }) =>
+    api.post<ApiResponse<{ message: string }>>('/api/permissions/revoke', data),
+  getFilePermissions: (fileId: string) =>
+    api.get<ApiResponse<{ isOwner: boolean; permissions: Array<{ id: string; userId: string; permission: string; userName: string | null; userEmail: string; createdAt: string }> }>>(`/api/permissions/file/${fileId}`),
+  checkAccess: (fileId: string) =>
+    api.get<ApiResponse<{ hasAccess: boolean; permission: string | null; isOwner: boolean }>>(`/api/permissions/check/${fileId}`),
+  addTag: (data: { fileId: string; name: string; color?: string }) =>
+    api.post<ApiResponse<FileTag>>('/api/permissions/tags/add', data),
+  removeTag: (data: { fileId: string; tagName: string }) =>
+    api.post<ApiResponse<{ message: string }>>('/api/permissions/tags/remove', data),
+  getFileTags: (fileId: string) =>
+    api.get<ApiResponse<FileTag[]>>(`/api/permissions/tags/file/${fileId}`),
+  getUserTags: () =>
+    api.get<ApiResponse<FileTag[]>>('/api/permissions/tags/user'),
+};
+
+export const previewApi = {
+  getInfo: (fileId: string) =>
+    api.get<ApiResponse<{
+      id: string;
+      name: string;
+      size: number;
+      mimeType: string | null;
+      previewable: boolean;
+      previewType: string;
+      language: string | null;
+      extension: string;
+      canPreview: boolean;
+    }>>(`/api/preview/${fileId}/info`),
+  getRaw: (fileId: string) =>
+    api.get<ApiResponse<{ content: string; mimeType: string | null; name: string; size: number }>>(`/api/preview/${fileId}/raw`),
+  streamUrl: (fileId: string) =>
+    `${import.meta.env.VITE_API_URL || ''}/api/preview/${fileId}/stream`,
+  thumbnailUrl: (fileId: string, width = 256, height = 256) =>
+    `${import.meta.env.VITE_API_URL || ''}/api/preview/${fileId}/thumbnail?width=${width}&height=${height}`,
+  getOffice: (fileId: string) =>
+    api.get<ApiResponse<{ fileName: string; mimeType: string; base64Content: string; size: number }>>(`/api/preview/${fileId}/office`),
+};
+
+export default api;

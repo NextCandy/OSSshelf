@@ -1,27 +1,27 @@
 /**
- * FILES.TSX — Phase 4 upgrade
- *
- * Key changes vs Phase 3:
- * 1. Import useFolderUpload hook
- * 2. onDrop now distinguishes folder-drop vs plain file drop
- *    - Folder drop → useFolderUpload.uploadFolderEntries(e.dataTransfer.items)
- *    - Plain files → existing uploadMutation path
- * 3. Delete confirmation copy updated: "移入回收站" is now the phrase
- * 4. Stats invalidation on delete
- *
- * The full Files.tsx is identical to Phase 3's version with the additions below.
- * Only the onDrop callback and a few imports change, so this file IS the
- * canonical Files.tsx for Phase 4.
+ * Files.tsx
+ * 文件管理页面
+ * 
+ * 功能:
+ * - 文件列表展示 (列表/网格/瀑布流)
+ * - 右键菜单
+ * - 键盘快捷键
+ * - 批量操作
+ * - 文件上传/下载
+ * - 移动端触摸手势
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useFileStore } from '@/stores/files';
+import { useFileStore, type ViewMode } from '@/stores/files';
 import { useAuthStore } from '@/stores/auth';
 import { filesApi, shareApi, bucketsApi, PROVIDER_META, type StorageBucket } from '@/services/api';
 import { presignUpload } from '@/services/presignUpload';
 import { useFolderUpload } from '@/hooks/useFolderUpload';
+import { useFileKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useResponsive } from '@/hooks/useResponsive';
+import { useContextMenuState, ContextMenuItem } from '@/components/ui/ContextMenu';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { FileIcon } from '@/components/ui/FileIcon';
@@ -35,14 +35,13 @@ import { getFileCategory, getCategoryBg, isPreviewable } from '@/utils/fileTypes
 import {
   Upload, FolderPlus, Grid, List, Download, Trash2, Share2,
   Search, X, Pencil, Eye, CheckSquare, Square, SortAsc, SortDesc,
-  Image as ImageIcon, FolderInput, Database, ChevronDown,
+  Image as ImageIcon, FolderInput, Database, MoreVertical,
+  Copy, Scissors, Clipboard, RefreshCw, Columns, LayoutGrid,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import type { FileItem } from '@osshelf/shared';
 import { cn } from '@/utils';
 
-
-// ── NewFolderDialog ─────────────────────────────────────────────────────
 function NewFolderDialog({
   isRoot, name, bucketId, onNameChange, onBucketChange, onConfirm, onCancel, loading,
 }: {
@@ -157,9 +156,13 @@ export default function Files() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { token } = useAuthStore();
+  const { isMobile } = useResponsive();
   const {
-    viewMode, setViewMode, selectedFiles, toggleFileSelection, clearSelection,
+    viewMode, setViewMode, selectedFiles, selectedFileItems,
+    toggleFileSelection, clearSelection, selectAll,
     sortBy, sortOrder, setSort, searchQuery, setSearchQuery,
+    clipboard, setClipboard, clearClipboard,
+    focusedFileId, setFocusedFile, getNextFileId,
   } = useFileStore();
 
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
@@ -175,8 +178,11 @@ export default function Files() {
   const [moveFile, setMoveFile] = useState<FileItem | null>(null);
   const [searchInput, setSearchInput] = useState('');
   const [galleryMode, setGalleryMode] = useState(false);
+  
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { openContextMenu, closeContextMenu, ContextMenuComponent } = useContextMenuState();
 
-  // ── Folder upload hook ────────────────────────────────────────────
   const { uploadFolderEntries } = useFolderUpload({
     currentFolderId: folderId,
     onFileStart: (name, key) => setUploadProgresses((p) => ({ ...p, [key]: 0 })),
@@ -195,7 +201,6 @@ export default function Files() {
     },
   });
 
-  // ── Breadcrumbs ──────────────────────────────────────────────────
   const { data: breadcrumbs = [] } = useQuery<BreadcrumbItem[]>({
     queryKey: ['breadcrumbs', folderId],
     enabled: !!folderId,
@@ -213,8 +218,7 @@ export default function Files() {
     },
   });
 
-  // ── File list ────────────────────────────────────────────────────
-  const { data: files = [], isLoading } = useQuery<FileItem[]>({
+  const { data: files = [], isLoading, refetch } = useQuery<FileItem[]>({
     queryKey: ['files', folderId],
     queryFn: () => filesApi.list({ parentId: folderId || null }).then((r) => r.data.data ?? []),
   });
@@ -230,7 +234,6 @@ export default function Files() {
   const imageFiles = displayFiles.filter((f) => f.mimeType?.startsWith('image/'));
   const hasImages = imageFiles.length > 0;
 
-  // ── Mutations ────────────────────────────────────────────────────
   const createFolderMutation = useMutation({
     mutationFn: (name: string) => filesApi.createFolder(name, folderId, !folderId ? newFolderBucketId : null),
     onSuccess: () => {
@@ -247,9 +250,7 @@ export default function Files() {
         file,
         parentId,
         onProgress: (p) => setUploadProgresses((prev) => ({ ...prev, [key]: p })),
-        onFallback: () => {
-          // Silently fell back to proxy — no UX change needed
-        },
+        onFallback: () => {},
       }),
     onSuccess: (_, { key }) => {
       queryClient.invalidateQueries({ queryKey: ['files', folderId] });
@@ -312,13 +313,11 @@ export default function Files() {
     onError: (e: any) => toast({ title: '创建分享失败', description: e.response?.data?.error?.message, variant: 'destructive' }),
   });
 
-  // ── Dropzone — detects folders via dataTransfer.items ─────────────
   const onDrop = useCallback(
     (acceptedFiles: File[], _rejected: any[], event: any) => {
       const nativeEvent = event?.nativeEvent ?? event;
       const items = nativeEvent?.dataTransfer?.items as DataTransferItemList | undefined;
 
-      // Check if any item is a directory
       const hasFolder = items
         ? Array.from(items).some((item) => {
             const entry = item.webkitGetAsEntry?.();
@@ -327,10 +326,8 @@ export default function Files() {
         : false;
 
       if (hasFolder && items) {
-        // Use folder-aware upload
         uploadFolderEntries(items);
       } else {
-        // Plain files
         acceptedFiles.forEach((file) => {
           const key = `${file.name}-${Date.now()}`;
           uploadMutation.mutate({ file, parentId: folderId || null, key });
@@ -342,24 +339,20 @@ export default function Files() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop, noClick: true });
 
-  // ── Handlers ─────────────────────────────────────────────────────
   const handleDownload = async (file: FileItem) => {
     try {
       const { url, fileName } = await import('@/services/presignUpload').then(m =>
         m.getPresignedDownloadUrl(file.id)
       );
-      // Presigned URL or proxy URL — either can be used as <a href>
       const a = document.createElement('a');
       a.href = url;
       a.download = fileName || file.name;
-      // For presigned URLs (cross-origin), target=_blank avoids CORS on anchor click
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       document.body.appendChild(a);
       a.click();
       a.remove();
     } catch {
-      // Last-resort: proxy download via blob
       try {
         const res = await filesApi.download(file.id);
         const url = window.URL.createObjectURL(res.data as Blob);
@@ -395,13 +388,183 @@ export default function Files() {
     shareMutation.mutate({ fileId: shareFileId, password: sharePassword || undefined, expiresAt, downloadLimit: shareDownloadLimit ? Number(shareDownloadLimit) : undefined });
   };
 
+  const getFileContextMenuItems = useCallback((file: FileItem): ContextMenuItem[] => {
+    const canPreview = !file.isFolder && isPreviewable(file.mimeType);
+    
+    return [
+      {
+        id: 'open',
+        label: file.isFolder ? '打开文件夹' : '打开',
+        icon: <Eye className="h-4 w-4" />,
+        action: () => handleFileClick(file),
+      },
+      { id: 'divider1', label: '', divider: true },
+      {
+        id: 'download',
+        label: '下载',
+        icon: <Download className="h-4 w-4" />,
+        action: () => handleDownload(file),
+        disabled: file.isFolder,
+      },
+      {
+        id: 'share',
+        label: '分享',
+        icon: <Share2 className="h-4 w-4" />,
+        action: () => setShareFileId(file.id),
+        disabled: file.isFolder,
+      },
+      { id: 'divider2', label: '', divider: true },
+      {
+        id: 'rename',
+        label: '重命名',
+        icon: <Pencil className="h-4 w-4" />,
+        shortcut: 'F2',
+        action: () => setRenameFile(file),
+      },
+      {
+        id: 'move',
+        label: '移动到...',
+        icon: <FolderInput className="h-4 w-4" />,
+        action: () => setMoveFile(file),
+      },
+      {
+        id: 'copy',
+        label: '复制',
+        icon: <Copy className="h-4 w-4" />,
+        shortcut: 'Ctrl+C',
+        action: () => {
+          setClipboard('copy', [file], folderId || null);
+          toast({ title: '已复制到剪贴板' });
+        },
+      },
+      {
+        id: 'cut',
+        label: '剪切',
+        icon: <Scissors className="h-4 w-4" />,
+        shortcut: 'Ctrl+X',
+        action: () => {
+          setClipboard('cut', [file], folderId || null);
+          toast({ title: '已剪切到剪贴板' });
+        },
+      },
+      { id: 'divider3', label: '', divider: true },
+      {
+        id: 'delete',
+        label: '移入回收站',
+        icon: <Trash2 className="h-4 w-4" />,
+        danger: true,
+        action: () => {
+          if (confirm(`将 "${file.name}" 移入回收站？`)) {
+            deleteMutation.mutate(file.id);
+          }
+        },
+      },
+    ];
+  }, [folderId, deleteMutation, setClipboard, toast]);
+
+  const getBackgroundContextMenuItems = useCallback((): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [
+      {
+        id: 'refresh',
+        label: '刷新',
+        icon: <RefreshCw className="h-4 w-4" />,
+        action: () => refetch(),
+      },
+      { id: 'divider1', label: '', divider: true },
+      {
+        id: 'upload',
+        label: '上传文件',
+        icon: <Upload className="h-4 w-4" />,
+        shortcut: 'Ctrl+U',
+        action: () => fileInputRef.current?.click(),
+      },
+      {
+        id: 'newFolder',
+        label: '新建文件夹',
+        icon: <FolderPlus className="h-4 w-4" />,
+        shortcut: 'Ctrl+Shift+N',
+        action: () => setShowNewFolderDialog(true),
+      },
+    ];
+
+    if (clipboard && clipboard.files.length > 0) {
+      items.push(
+        { id: 'divider2', label: '', divider: true },
+        {
+          id: 'paste',
+          label: `粘贴 (${clipboard.files.length} 个项目)`,
+          icon: <Clipboard className="h-4 w-4" />,
+          shortcut: 'Ctrl+V',
+          action: () => {
+            toast({ title: '粘贴功能开发中' });
+          },
+        }
+      );
+    }
+
+    return items;
+  }, [refetch, clipboard, toast]);
+
+  const handleContextMenu = (e: React.MouseEvent, file?: FileItem) => {
+    if (file) {
+      openContextMenu(e, getFileContextMenuItems(file));
+    } else {
+      openContextMenu(e, getBackgroundContextMenuItems());
+    }
+  };
+
+  useFileKeyboardShortcuts({
+    onSelectAll: () => selectAll(displayFiles),
+    onClearSelection: clearSelection,
+    onDelete: handleBatchDelete,
+    onRename: () => {
+      const file = selectedFileItems[0];
+      if (selectedFileItems.length === 1 && file) {
+        setRenameFile(file);
+      }
+    },
+    onOpen: () => {
+      const file = selectedFileItems[0];
+      if (selectedFileItems.length === 1 && file) {
+        handleFileClick(file);
+      }
+    },
+    onNavigateUp: () => {
+      const nextId = getNextFileId(displayFiles, 'up');
+      if (nextId) {
+        setFocusedFile(nextId);
+        toggleFileSelection(nextId);
+      }
+    },
+    onNavigateDown: () => {
+      const nextId = getNextFileId(displayFiles, 'down');
+      if (nextId) {
+        setFocusedFile(nextId);
+        toggleFileSelection(nextId);
+      }
+    },
+    onNewFolder: () => setShowNewFolderDialog(true),
+    onUpload: () => fileInputRef.current?.click(),
+    onToggleGridView: () => { setViewMode('grid'); setGalleryMode(false); },
+    onToggleListView: () => { setViewMode('list'); setGalleryMode(false); },
+    onFocusSearch: () => searchInputRef.current?.focus(),
+    selectedCount: selectedFiles.length,
+    hasFiles: displayFiles.length > 0,
+  });
+
   const activeUploads = Object.entries(uploadProgresses);
+
+  const viewModes: { mode: ViewMode; icon: typeof List; label: string }[] = [
+    { mode: 'list', icon: List, label: '列表' },
+    { mode: 'grid', icon: Grid, label: '网格' },
+    { mode: 'masonry', icon: Columns, label: '瀑布流' },
+  ];
 
   return (
     <div {...getRootProps()} className="space-y-5">
       <input {...getInputProps()} />
+      <ContextMenuComponent />
 
-      {/* Drag overlay */}
       {isDragActive && (
         <div className="fixed inset-0 z-50 bg-primary/10 flex items-center justify-center pointer-events-none">
           <div className="bg-card border-2 border-dashed border-primary rounded-xl p-12 text-center shadow-2xl">
@@ -411,60 +574,99 @@ export default function Files() {
         </div>
       )}
 
-      {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="space-y-1">
-          <h1 className="text-2xl font-bold">文件管理</h1>
+          <h1 className="text-xl lg:text-2xl font-bold">文件管理</h1>
           <BreadcrumbNav items={breadcrumbs} />
         </div>
+        
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <input className="pl-8 pr-8 h-9 w-40 sm:w-52 rounded-md border bg-background text-sm outline-none focus:ring-2 focus:ring-ring" placeholder="搜索文件..." value={searchInput}
-              onChange={(e) => { setSearchInput(e.target.value); setSearchQuery(e.target.value); }} />
+            <input
+              ref={searchInputRef}
+              className="pl-8 pr-8 h-9 w-40 sm:w-52 rounded-md border bg-background text-sm outline-none focus:ring-2 focus:ring-ring"
+              placeholder="搜索文件..."
+              value={searchInput}
+              onChange={(e) => { setSearchInput(e.target.value); setSearchQuery(e.target.value); }}
+            />
             {searchInput && (
               <button className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => { setSearchInput(''); setSearchQuery(''); }}>
                 <X className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
+          
           <Button variant="outline" size="sm" onClick={() => handleSort('name')} className="hidden sm:flex gap-1">
             名称 {sortBy === 'name' && (sortOrder === 'asc' ? <SortAsc className="h-3.5 w-3.5" /> : <SortDesc className="h-3.5 w-3.5" />)}
           </Button>
           <Button variant="outline" size="sm" onClick={() => handleSort('size')} className="hidden sm:flex gap-1">
             大小 {sortBy === 'size' && (sortOrder === 'asc' ? <SortAsc className="h-3.5 w-3.5" /> : <SortDesc className="h-3.5 w-3.5" />)}
           </Button>
+          
           <div className="flex border rounded-md overflow-hidden">
-            <Button variant="ghost" size="icon" className={cn('rounded-none h-9 w-9', viewMode === 'list' && !galleryMode && 'bg-accent')} onClick={() => { setViewMode('list'); setGalleryMode(false); }} title="列表"><List className="h-4 w-4" /></Button>
-            <Button variant="ghost" size="icon" className={cn('rounded-none h-9 w-9 border-x', viewMode === 'grid' && !galleryMode && 'bg-accent')} onClick={() => { setViewMode('grid'); setGalleryMode(false); }} title="网格"><Grid className="h-4 w-4" /></Button>
-            {hasImages && <Button variant="ghost" size="icon" className={cn('rounded-none h-9 w-9', galleryMode && 'bg-accent')} onClick={() => setGalleryMode(true)} title="图库"><ImageIcon className="h-4 w-4" /></Button>}
+            {viewModes.map(({ mode, icon: Icon, label }) => (
+              <Button
+                key={mode}
+                variant="ghost"
+                size="icon"
+                className={cn('rounded-none h-9 w-9', viewMode === mode && !galleryMode && 'bg-accent')}
+                onClick={() => { setViewMode(mode); setGalleryMode(false); }}
+                title={label}
+              >
+                <Icon className="h-4 w-4" />
+              </Button>
+            ))}
+            {hasImages && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn('rounded-none h-9 w-9 border-l', galleryMode && 'bg-accent')}
+                onClick={() => setGalleryMode(true)}
+                title="图库"
+              >
+                <ImageIcon className="h-4 w-4" />
+              </Button>
+            )}
           </div>
-          <Button variant="outline" size="sm" onClick={() => setShowNewFolderDialog(true)}><FolderPlus className="h-4 w-4 mr-1.5" />新建文件夹</Button>
+          
+          <Button variant="outline" size="sm" onClick={() => setShowNewFolderDialog(true)} className="hidden sm:flex">
+            <FolderPlus className="h-4 w-4 mr-1.5" />新建
+          </Button>
+          
           <label>
-            <Button asChild size="sm"><span><Upload className="h-4 w-4 mr-1.5" />上传文件</span></Button>
-            <input type="file" className="hidden" multiple onChange={(e) => {
-              Array.from(e.target.files || []).forEach((file) => {
-                const key = `${file.name}-${Date.now()}`;
-                uploadMutation.mutate({ file, parentId: folderId || null, key });
-              });
-              e.target.value = '';
-            }} />
+            <Button asChild size="sm"><span><Upload className="h-4 w-4 mr-1.5" />上传</span></Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              onChange={(e) => {
+                Array.from(e.target.files || []).forEach((file) => {
+                  const key = `${file.name}-${Date.now()}`;
+                  uploadMutation.mutate({ file, parentId: folderId || null, key });
+                });
+                e.target.value = '';
+              }}
+            />
           </label>
         </div>
       </div>
 
-      {/* Batch actions */}
       {selectedFiles.length > 0 && (
         <div className="flex items-center gap-3 px-4 py-2.5 bg-primary/10 border border-primary/20 rounded-lg text-sm">
           <CheckSquare className="h-4 w-4 text-primary" />
           <span className="font-medium">已选中 {selectedFiles.length} 个</span>
           <div className="flex-1" />
-          <Button variant="outline" size="sm" onClick={clearSelection}><Square className="h-3.5 w-3.5 mr-1" />取消</Button>
-          <Button variant="destructive" size="sm" onClick={handleBatchDelete} disabled={deleteMutation.isPending}><Trash2 className="h-3.5 w-3.5 mr-1" />批量删除</Button>
+          <Button variant="outline" size="sm" onClick={clearSelection}>
+            <Square className="h-3.5 w-3.5 mr-1" />取消
+          </Button>
+          <Button variant="destructive" size="sm" onClick={handleBatchDelete} disabled={deleteMutation.isPending}>
+            <Trash2 className="h-3.5 w-3.5 mr-1" />批量删除
+          </Button>
         </div>
       )}
 
-      {/* Upload progress */}
       {activeUploads.length > 0 && (
         <div className="space-y-2">
           {activeUploads.map(([key, progress]) => (
@@ -481,7 +683,6 @@ export default function Files() {
         </div>
       )}
 
-      {/* Dialogs */}
       {showNewFolderDialog && (
         <NewFolderDialog
           isRoot={!folderId}
@@ -516,40 +717,94 @@ export default function Files() {
       {moveFile && <MoveFolderPicker excludeIds={[moveFile.id]} isPending={moveMutation.isPending} onConfirm={(targetParentId) => moveMutation.mutate({ id: moveFile.id, targetParentId })} onCancel={() => setMoveFile(null)} />}
       {previewFile && <FilePreview file={previewFile} token={token || ''} onClose={() => setPreviewFile(null)} onDownload={handleDownload} onShare={(id) => { setPreviewFile(null); setShareFileId(id); }} />}
 
-      {/* File list */}
       {isLoading ? (
         <div className="text-center py-16 text-muted-foreground">加载中...</div>
       ) : displayFiles.length === 0 ? (
-        <div className="text-center py-16 text-muted-foreground space-y-2">
+        <div
+          className="text-center py-16 text-muted-foreground space-y-2"
+          onContextMenu={(e) => handleContextMenu(e)}
+        >
           <div className="text-6xl opacity-20">📂</div>
           <p className="font-medium">{searchQuery ? `没有找到 "${searchQuery}"` : '暂无文件'}</p>
           <p className="text-sm">{searchQuery ? '换个关键词试试' : '拖放文件或整个文件夹到这里上传'}</p>
         </div>
       ) : galleryMode && hasImages ? (
-        <div className="columns-2 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 gap-3">
+        <div className="masonry-grid">
           {imageFiles.map((file) => (
-            <GalleryItem key={file.id} file={file} onClick={() => setPreviewFile(file)} onDelete={() => confirm(`删除 "${file.name}"？`) && deleteMutation.mutate(file.id)} />
+            <GalleryItem
+              key={file.id}
+              file={file}
+              onClick={() => setPreviewFile(file)}
+              onDelete={() => confirm(`删除 "${file.name}"？`) && deleteMutation.mutate(file.id)}
+              onContextMenu={(e) => handleContextMenu(e, file)}
+            />
           ))}
         </div>
       ) : viewMode === 'list' ? (
-        <div className="bg-card border rounded-xl overflow-hidden divide-y">
+        <div
+          className="bg-card border rounded-xl overflow-hidden divide-y"
+          onContextMenu={(e) => handleContextMenu(e)}
+        >
           {displayFiles.map((file) => (
-            <ListItem key={file.id} file={file} isSelected={selectedFiles.includes(file.id)}
-              onClick={handleFileClick} onToggleSelect={toggleFileSelection}
-              onDownload={handleDownload} onShare={setShareFileId}
+            <ListItem
+              key={file.id}
+              file={file}
+              isSelected={selectedFiles.includes(file.id)}
+              onClick={handleFileClick}
+              onToggleSelect={toggleFileSelection}
+              onDownload={handleDownload}
+              onShare={setShareFileId}
               onDelete={(f) => confirm(`将 "${f.name}" 移入回收站？`) && deleteMutation.mutate(f.id)}
-              onRename={setRenameFile} onPreview={setPreviewFile} onMove={setMoveFile}
+              onRename={setRenameFile}
+              onPreview={setPreviewFile}
+              onMove={setMoveFile}
+              onContextMenu={handleContextMenu}
+            />
+          ))}
+        </div>
+      ) : viewMode === 'grid' ? (
+        <div
+          className="file-grid"
+          onContextMenu={(e) => handleContextMenu(e)}
+        >
+          {displayFiles.map((file) => (
+            <GridItem
+              key={file.id}
+              file={file}
+              token={token || ''}
+              isSelected={selectedFiles.includes(file.id)}
+              onClick={handleFileClick}
+              onToggleSelect={toggleFileSelection}
+              onDownload={handleDownload}
+              onShare={setShareFileId}
+              onDelete={(f) => confirm(`将 "${f.name}" 移入回收站？`) && deleteMutation.mutate(f.id)}
+              onRename={setRenameFile}
+              onPreview={setPreviewFile}
+              onMove={setMoveFile}
+              onContextMenu={handleContextMenu}
             />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+        <div
+          className="masonry-grid"
+          onContextMenu={(e) => handleContextMenu(e)}
+        >
           {displayFiles.map((file) => (
-            <GridItem key={file.id} file={file} token={token || ''} isSelected={selectedFiles.includes(file.id)}
-              onClick={handleFileClick} onToggleSelect={toggleFileSelection}
-              onDownload={handleDownload} onShare={setShareFileId}
+            <MasonryItem
+              key={file.id}
+              file={file}
+              token={token || ''}
+              isSelected={selectedFiles.includes(file.id)}
+              onClick={handleFileClick}
+              onToggleSelect={toggleFileSelection}
+              onDownload={handleDownload}
+              onShare={setShareFileId}
               onDelete={(f) => confirm(`将 "${f.name}" 移入回收站？`) && deleteMutation.mutate(f.id)}
-              onRename={setRenameFile} onPreview={setPreviewFile} onMove={setMoveFile}
+              onRename={setRenameFile}
+              onPreview={setPreviewFile}
+              onMove={setMoveFile}
+              onContextMenu={handleContextMenu}
             />
           ))}
         </div>
@@ -558,27 +813,36 @@ export default function Files() {
   );
 }
 
-// ── Sub-components ──────────────────────────────────────────────────────────
-
 interface ItemProps {
-  file: FileItem; isSelected?: boolean; token?: string;
-  onClick: (f: FileItem) => void; onToggleSelect: (id: string) => void;
-  onDownload: (f: FileItem) => void; onShare: (id: string) => void;
-  onDelete: (f: FileItem) => void; onRename: (f: FileItem) => void;
-  onPreview: (f: FileItem) => void; onMove: (f: FileItem) => void;
+  file: FileItem;
+  isSelected?: boolean;
+  token?: string;
+  onClick: (f: FileItem) => void;
+  onToggleSelect: (id: string, file?: FileItem) => void;
+  onDownload: (f: FileItem) => void;
+  onShare: (id: string) => void;
+  onDelete: (f: FileItem) => void;
+  onRename: (f: FileItem) => void;
+  onPreview: (f: FileItem) => void;
+  onMove: (f: FileItem) => void;
+  onContextMenu: (e: React.MouseEvent, file?: FileItem) => void;
 }
 
-function ListItem({ file, isSelected, onClick, onToggleSelect, onDownload, onShare, onDelete, onRename, onPreview, onMove }: ItemProps) {
+function ListItem({ file, isSelected, onClick, onToggleSelect, onDownload, onShare, onDelete, onRename, onPreview, onMove, onContextMenu }: ItemProps) {
   const canPreview = !file.isFolder && isPreviewable(file.mimeType);
   return (
-    <div className={cn('flex items-center gap-3 px-4 py-3 hover:bg-accent/40 transition-colors cursor-pointer group', isSelected && 'bg-primary/5')}>
+    <div
+      className={cn('flex items-center gap-3 px-4 py-3 hover:bg-accent/40 transition-colors cursor-pointer group', isSelected && 'bg-primary/5')}
+      onClick={() => onClick(file)}
+      onContextMenu={(e) => onContextMenu(e, file)}
+    >
       {!file.isFolder
-        ? <button className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => { e.stopPropagation(); onToggleSelect(file.id); }}>
+        ? <button className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => { e.stopPropagation(); onToggleSelect(file.id, file); }}>
             {isSelected ? <CheckSquare className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4 text-muted-foreground" />}
           </button>
         : <div className="w-4 flex-shrink-0" />}
-      <div className="flex-shrink-0" onClick={() => onClick(file)}><FileIcon mimeType={file.mimeType} isFolder={file.isFolder} size="md" /></div>
-      <div className="flex-1 min-w-0" onClick={() => onClick(file)}>
+      <div className="flex-shrink-0"><FileIcon mimeType={file.mimeType} isFolder={file.isFolder} size="md" /></div>
+      <div className="flex-1 min-w-0">
         <p className="font-medium truncate text-sm">{file.name}</p>
         <p className="text-xs text-muted-foreground flex items-center gap-1.5 flex-wrap">
           {file.isFolder ? '文件夹' : formatBytes(file.size)} · {formatDate(file.updatedAt)}
@@ -603,16 +867,20 @@ function ListItem({ file, isSelected, onClick, onToggleSelect, onDownload, onSha
   );
 }
 
-function GridItem({ file, isSelected, onClick, onToggleSelect, onDownload, onShare, onDelete, onRename, onPreview, onMove }: ItemProps) {
+function GridItem({ file, isSelected, onClick, onToggleSelect, onDownload, onShare, onDelete, onRename, onPreview, onMove, onContextMenu }: ItemProps) {
   const bg = getCategoryBg(getFileCategory(file.mimeType, file.isFolder));
   const canPreview = !file.isFolder && isPreviewable(file.mimeType);
   const isImage = file.mimeType?.startsWith('image/');
   return (
-    <div className={cn('relative bg-card border rounded-xl overflow-hidden cursor-pointer group transition-all hover:shadow-md hover:-translate-y-0.5', isSelected && 'ring-2 ring-primary')} onClick={() => onClick(file)}>
+    <div
+      className={cn('relative bg-card border rounded-xl overflow-hidden cursor-pointer group transition-all hover:shadow-md hover:-translate-y-0.5', isSelected && 'ring-2 ring-primary')}
+      onClick={() => onClick(file)}
+      onContextMenu={(e) => onContextMenu(e, file)}
+    >
       <div className={cn('flex items-center justify-center h-28 relative', !isImage && bg)}>
         {isImage ? <img src={filesApi.previewUrl(file.id)} alt={file.name} className="w-full h-full object-cover" onError={(e) => { (e.target as any).style.display = 'none'; }} /> : <FileIcon mimeType={file.mimeType} isFolder={file.isFolder} size="lg" />}
         {!file.isFolder && (
-          <button className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity z-10" onClick={(e) => { e.stopPropagation(); onToggleSelect(file.id); }}>
+          <button className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity z-10" onClick={(e) => { e.stopPropagation(); onToggleSelect(file.id, file); }}>
             <div className={cn('rounded w-5 h-5 flex items-center justify-center', isSelected ? 'bg-primary text-primary-foreground' : 'bg-black/40 text-white')}>
               {isSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
             </div>
@@ -643,9 +911,47 @@ function GridItem({ file, isSelected, onClick, onToggleSelect, onDownload, onSha
   );
 }
 
-function GalleryItem({ file, onClick, onDelete }: { file: FileItem; onClick: () => void; onDelete: () => void }) {
+function MasonryItem({ file, isSelected, onClick, onToggleSelect, onDownload, onShare, onDelete, onRename, onPreview, onMove, onContextMenu }: ItemProps) {
+  const bg = getCategoryBg(getFileCategory(file.mimeType, file.isFolder));
+  const isImage = file.mimeType?.startsWith('image/');
+  
   return (
-    <div className="relative mb-3 rounded-lg overflow-hidden group cursor-pointer break-inside-avoid" onClick={onClick}>
+    <div
+      className={cn('masonry-item relative bg-card border rounded-lg overflow-hidden cursor-pointer group', isSelected && 'ring-2 ring-primary')}
+      onClick={() => onClick(file)}
+      onContextMenu={(e) => onContextMenu(e, file)}
+    >
+      <div className={cn('relative', !isImage && bg)}>
+        {isImage ? (
+          <img src={filesApi.previewUrl(file.id)} alt={file.name} className="w-full block object-cover" loading="lazy" />
+        ) : (
+          <div className="flex items-center justify-center p-8">
+            <FileIcon mimeType={file.mimeType} isFolder={file.isFolder} size="lg" />
+          </div>
+        )}
+        {!file.isFolder && (
+          <button className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity z-10" onClick={(e) => { e.stopPropagation(); onToggleSelect(file.id, file); }}>
+            <div className={cn('rounded w-5 h-5 flex items-center justify-center', isSelected ? 'bg-primary text-primary-foreground' : 'bg-black/40 text-white')}>
+              {isSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+            </div>
+          </button>
+        )}
+      </div>
+      <div className="px-2 py-1.5 border-t">
+        <p className="text-xs font-medium truncate">{file.name}</p>
+        <p className="text-[10px] text-muted-foreground">{file.isFolder ? '文件夹' : formatBytes(file.size)}</p>
+      </div>
+    </div>
+  );
+}
+
+function GalleryItem({ file, onClick, onDelete, onContextMenu }: { file: FileItem; onClick: () => void; onDelete: () => void; onContextMenu: (e: React.MouseEvent) => void }) {
+  return (
+    <div
+      className="masonry-item relative rounded-lg overflow-hidden group cursor-pointer"
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+    >
       <img src={filesApi.previewUrl(file.id)} alt={file.name} className="w-full block object-cover" loading="lazy" />
       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2">
         <p className="text-white text-xs font-medium truncate">{file.name}</p>

@@ -23,11 +23,36 @@ export interface FileItem {
   mimeType: string | null;
   hash: string | null;
   isFolder: boolean;
+  bucketId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  tags?: FileTag[];
+  permissions?: FilePermission[];
+}
+
+export type FileType = 'file' | 'folder';
+
+export interface FileTag {
+  id: string;
+  fileId: string;
+  userId: string;
+  name: string;
+  color: string;
+  createdAt: string;
+}
+
+export interface FilePermission {
+  id: string;
+  fileId: string;
+  userId: string;
+  permission: PermissionLevel;
+  grantedBy: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type FileType = 'file' | 'folder';
+export type PermissionLevel = 'read' | 'write' | 'admin';
 
 export interface Share {
   id: string;
@@ -47,6 +72,99 @@ export interface WebDAVSession {
   expiresAt: string;
   createdAt: string;
 }
+
+export interface AuditLog {
+  id: string;
+  userId: string | null;
+  action: AuditAction;
+  resourceType: string;
+  resourceId: string | null;
+  details: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  status: 'success' | 'failed';
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export type AuditAction =
+  | 'user.login'
+  | 'user.logout'
+  | 'user.register'
+  | 'user.update'
+  | 'user.delete'
+  | 'file.upload'
+  | 'file.download'
+  | 'file.delete'
+  | 'file.move'
+  | 'file.rename'
+  | 'folder.create'
+  | 'share.create'
+  | 'share.access'
+  | 'bucket.create'
+  | 'bucket.update'
+  | 'bucket.delete'
+  | 'admin.user_update'
+  | 'admin.config_change';
+
+export interface LoginAttempt {
+  id: string;
+  email: string;
+  ipAddress: string;
+  success: boolean;
+  userAgent: string | null;
+  createdAt: string;
+}
+
+export interface UserDevice {
+  id: string;
+  userId: string;
+  deviceId: string;
+  deviceName: string | null;
+  deviceType: 'desktop' | 'mobile' | 'tablet' | 'unknown';
+  ipAddress: string | null;
+  userAgent: string | null;
+  lastActive: string;
+  createdAt: string;
+}
+
+export interface UploadTask {
+  id: string;
+  userId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string | null;
+  parentId: string | null;
+  bucketId: string | null;
+  r2Key: string;
+  uploadId: string;
+  totalParts: number;
+  uploadedParts: number[];
+  status: UploadTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
+export type UploadTaskStatus = 'pending' | 'uploading' | 'completed' | 'failed' | 'expired';
+
+export interface DownloadTask {
+  id: string;
+  userId: string;
+  url: string;
+  fileName: string | null;
+  fileSize: number | null;
+  parentId: string | null;
+  bucketId: string | null;
+  status: DownloadTaskStatus;
+  progress: number;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export type DownloadTaskStatus = 'pending' | 'downloading' | 'completed' | 'failed';
 
 export interface ApiResponse<T = unknown> {
   success: boolean;
@@ -84,6 +202,12 @@ export interface FileListParams extends PaginationParams {
   sortBy?: 'name' | 'size' | 'createdAt' | 'updatedAt';
   sortOrder?: 'asc' | 'desc';
   search?: string;
+  tags?: string[];
+  mimeType?: string;
+  minSize?: number;
+  maxSize?: number;
+  createdAfter?: string;
+  createdBefore?: string;
 }
 
 export interface ShareCreateParams {
@@ -96,6 +220,8 @@ export interface ShareCreateParams {
 export interface AuthLoginParams {
   email: string;
   password: string;
+  deviceId?: string;
+  deviceName?: string;
 }
 
 export interface AuthRegisterParams extends AuthLoginParams {
@@ -106,4 +232,22 @@ export interface AuthRegisterParams extends AuthLoginParams {
 export interface AuthResponse {
   user: User;
   token: string;
+  deviceId?: string;
+}
+
+export interface BatchOperationResult {
+  success: number;
+  failed: number;
+  errors: Array<{ id: string; error: string }>;
+}
+
+export interface FileSearchResult {
+  items: FileItem[];
+  total: number;
+  aggregations?: {
+    types: Record<string, number>;
+    mimeTypes: Record<string, number>;
+    tags: Record<string, number>;
+    sizeRange: { min: number; max: number };
+  };
 }

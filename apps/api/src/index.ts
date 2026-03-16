@@ -10,6 +10,13 @@ import webdavRoutes from './routes/webdav';
 import bucketsRoutes from './routes/buckets';
 import presignRoutes from './routes/presign';
 import adminRoutes from './routes/admin';
+import tasksRoutes from './routes/tasks';
+import permissionsRoutes from './routes/permissions';
+import batchRoutes from './routes/batch';
+import searchRoutes from './routes/search';
+import downloadsRoutes from './routes/downloads';
+import previewRoutes from './routes/preview';
+import cronRoutes from './routes/cron';
 import { errorHandler } from './middleware/error';
 import type { Env } from './types/env';
 
@@ -17,9 +24,6 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.use('*', logger());
 app.use('*', prettyJSON());
-// IMPORTANT: cors must be registered BEFORE secureHeaders.
-// secureHeaders injects Cross-Origin-Resource-Policy: same-origin by default,
-// which overrides CORS and causes preflight failures. We disable it explicitly.
 app.use('*', cors({
   origin: ['https://ossshelf.neutronx.uk'],
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'PROPFIND', 'MKCOL', 'COPY', 'MOVE', 'HEAD'],
@@ -29,7 +33,7 @@ app.use('*', cors({
   credentials: true,
 }));
 app.use('*', secureHeaders({
-  crossOriginResourcePolicy: false, // must be disabled to allow cross-origin requests
+  crossOriginResourcePolicy: false,
 }));
 
 app.use('*', errorHandler);
@@ -37,7 +41,7 @@ app.use('*', errorHandler);
 app.get('/', (c) => {
   return c.json({
     name: 'OSSshelf API',
-    version: '0.1.0',
+    version: '0.2.0',
     description: '基于 Cloudflare 部署的多厂商 OSS 文件管理系统 API',
   });
 });
@@ -52,6 +56,13 @@ app.route('/api/share', shareRoutes);
 app.route('/api/buckets', bucketsRoutes);
 app.route('/api/presign', presignRoutes);
 app.route('/api/admin', adminRoutes);
+app.route('/api/tasks', tasksRoutes);
+app.route('/api/permissions', permissionsRoutes);
+app.route('/api/batch', batchRoutes);
+app.route('/api/search', searchRoutes);
+app.route('/api/downloads', downloadsRoutes);
+app.route('/api/preview', previewRoutes);
+app.route('/cron', cronRoutes);
 app.route('/dav', webdavRoutes);
 
 app.notFound((c) => {

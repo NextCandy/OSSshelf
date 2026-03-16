@@ -1,11 +1,12 @@
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
-import { getDb, users } from '../db';
+import { eq, and, gt, desc } from 'drizzle-orm';
+import { getDb, users, loginAttempts, userDevices } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { signJWT, hashPassword, verifyPassword } from '../lib/crypto';
-import { JWT_EXPIRY, ERROR_CODES } from '@osshelf/shared';
+import { JWT_EXPIRY, ERROR_CODES, LOGIN_MAX_ATTEMPTS, LOGIN_LOCKOUT_DURATION, DEVICE_SESSION_EXPIRY } from '@osshelf/shared';
 import type { Env, Variables } from '../types/env';
 import { z } from 'zod';
+import { createAuditLog, getClientIp, getUserAgent } from '../lib/audit';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -15,8 +16,6 @@ const registerSchema = z.object({
   name: z.string().optional(),
   inviteCode: z.string().optional(),
 });
-
-// ── Registration config helpers ───────────────────────────────────────────
 
 const REG_CONFIG_KEY = 'admin:registration_config';
 const INVITE_PREFIX = 'admin:invite:';
@@ -32,13 +31,8 @@ async function getRegConfig(kv: KVNamespace): Promise<RegConfig> {
 const loginSchema = z.object({
   email: z.string().email('邮箱格式不正确'),
   password: z.string().min(1, '请输入密码'),
-});
-
-// ── GET /api/auth/registration-config (public) ─────────────────────────────
-
-app.get('/registration-config', async (c) => {
-  const config = await getRegConfig(c.env.KV);
-  return c.json({ success: true, data: config });
+  deviceId: z.string().optional(),
+  deviceName: z.string().optional(),
 });
 
 const updateProfileSchema = z.object({
@@ -54,7 +48,100 @@ const deleteAccountSchema = z.object({
   password: z.string().min(1, '请输入密码确认注销'),
 });
 
-// ── Register ──────────────────────────────────────────────────────────────
+app.get('/registration-config', async (c) => {
+  const config = await getRegConfig(c.env.KV);
+  return c.json({ success: true, data: config });
+});
+
+async function checkLoginLockout(db: ReturnType<typeof getDb>, email: string, ipAddress: string): Promise<{ locked: boolean; remainingAttempts: number; lockoutUntil: string | null }> {
+  const now = new Date();
+  const lockoutThreshold = new Date(now.getTime() - LOGIN_LOCKOUT_DURATION).toISOString();
+
+  const recentAttempts = await db.select().from(loginAttempts)
+    .where(and(
+      eq(loginAttempts.email, email),
+      gt(loginAttempts.createdAt, lockoutThreshold)
+    ))
+    .all();
+
+  const failedAttempts = recentAttempts.filter((a) => !a.success);
+
+  if (failedAttempts.length >= LOGIN_MAX_ATTEMPTS) {
+    const lastFailed = failedAttempts.sort((a, b) => b.createdAt > a.createdAt ? 1 : -1)[0];
+    const lockoutUntil = new Date(new Date(lastFailed.createdAt).getTime() + LOGIN_LOCKOUT_DURATION);
+    return { locked: true, remainingAttempts: 0, lockoutUntil: lockoutUntil.toISOString() };
+  }
+
+  return { locked: false, remainingAttempts: LOGIN_MAX_ATTEMPTS - failedAttempts.length, lockoutUntil: null };
+}
+
+async function recordLoginAttempt(
+  db: ReturnType<typeof getDb>,
+  email: string,
+  ipAddress: string,
+  success: boolean,
+  userAgent: string | null
+): Promise<void> {
+  await db.insert(loginAttempts).values({
+    id: crypto.randomUUID(),
+    email,
+    ipAddress,
+    success,
+    userAgent,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function detectDeviceType(userAgent: string | null): Promise<string> {
+  if (!userAgent) return 'unknown';
+  const ua = userAgent.toLowerCase();
+  if (/mobile|android|iphone|ipod|blackberry|iemobile|opera mini/i.test(ua)) {
+    if (/tablet|ipad/i.test(ua)) return 'tablet';
+    return 'mobile';
+  }
+  return 'desktop';
+}
+
+async function registerOrUpdateDevice(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  deviceId: string,
+  deviceName: string | undefined,
+  userAgent: string | null,
+  ipAddress: string | null
+): Promise<void> {
+  const deviceType = await detectDeviceType(userAgent);
+  const now = new Date().toISOString();
+
+  const existing = await db.select().from(userDevices)
+    .where(and(eq(userDevices.userId, userId), eq(userDevices.deviceId, deviceId)))
+    .get();
+
+  if (existing) {
+    await db.update(userDevices)
+      .set({
+        deviceName: deviceName || existing.deviceName,
+        deviceType,
+        ipAddress,
+        userAgent,
+        lastActive: now,
+      })
+      .where(eq(userDevices.id, existing.id));
+  } else {
+    await db.insert(userDevices).values({
+      id: crypto.randomUUID(),
+      userId,
+      deviceId,
+      deviceName: deviceName || `${deviceType} 设备`,
+      deviceType,
+      ipAddress,
+      userAgent,
+      lastActive: now,
+      createdAt: now,
+    });
+  }
+}
+
 app.post('/register', async (c) => {
   const body = await c.req.json();
   const result = registerSchema.safeParse(body);
@@ -69,7 +156,6 @@ app.post('/register', async (c) => {
   const { email, password, name, inviteCode } = result.data;
   const db = getDb(c.env.DB);
 
-  // ── Registration gate ──────────────────────────────────────────────────
   const regConfig = await getRegConfig(c.env.KV);
   const allUsers = await db.select({ id: users.id }).from(users).all();
   const isFirstUser = allUsers.length === 0;
@@ -118,7 +204,6 @@ app.post('/register', async (c) => {
   const passwordHash = await hashPassword(password);
   const userId = crypto.randomUUID();
   const now = new Date().toISOString();
-  // First registered user becomes admin
   const role = isFirstUser ? 'admin' : 'user';
 
   await db.insert(users).values({
@@ -127,7 +212,6 @@ app.post('/register', async (c) => {
     createdAt: now, updatedAt: now,
   });
 
-  // Mark invite code as used
   if (!isFirstUser && regConfig.requireInviteCode && inviteCode) {
     await c.env.KV.put(
       `${INVITE_PREFIX}${inviteCode.toUpperCase()}`,
@@ -141,16 +225,30 @@ app.post('/register', async (c) => {
     expirationTtl: Math.floor(JWT_EXPIRY / 1000),
   });
 
+  const deviceId = crypto.randomUUID();
+  await registerOrUpdateDevice(db, userId, deviceId, undefined, getUserAgent(c), getClientIp(c));
+
+  await createAuditLog({
+    env: c.env,
+    userId,
+    action: 'user.register',
+    resourceType: 'user',
+    resourceId: userId,
+    details: { email, name },
+    ipAddress: getClientIp(c),
+    userAgent: getUserAgent(c),
+  });
+
   return c.json({
     success: true,
     data: {
       user: { id: userId, email, name: name || null, role, storageQuota: 10737418240, storageUsed: 0, createdAt: now, updatedAt: now },
       token,
+      deviceId,
     },
   });
 });
 
-// ── Login ─────────────────────────────────────────────────────────────────
 app.post('/login', async (c) => {
   const body = await c.req.json();
   const result = loginSchema.safeParse(body);
@@ -162,22 +260,77 @@ app.post('/login', async (c) => {
     );
   }
 
-  const { email, password } = result.data;
+  const { email, password, deviceId: providedDeviceId, deviceName } = result.data;
   const db = getDb(c.env.DB);
+  const ipAddress = getClientIp(c);
+  const userAgent = getUserAgent(c);
+
+  const lockoutStatus = await checkLoginLockout(db, email, ipAddress || '');
+  if (lockoutStatus.locked) {
+    await createAuditLog({
+      env: c.env,
+      userId: undefined,
+      action: 'user.login',
+      resourceType: 'user',
+      status: 'failed',
+      errorMessage: '账户已锁定',
+      ipAddress,
+      userAgent,
+    });
+    return c.json(
+      { success: false, error: { code: ERROR_CODES.LOGIN_LOCKED, message: `登录失败次数过多，请等待至 ${lockoutStatus.lockoutUntil} 后重试` } },
+      429,
+    );
+  }
 
   const user = await db.select().from(users).where(eq(users.email, email)).get();
   if (!user) {
+    await recordLoginAttempt(db, email, ipAddress || '', false, userAgent);
     return c.json({ success: false, error: { code: ERROR_CODES.UNAUTHORIZED, message: '邮箱或密码错误' } }, 401);
   }
 
   const isValid = await verifyPassword(password, user.passwordHash);
   if (!isValid) {
-    return c.json({ success: false, error: { code: ERROR_CODES.UNAUTHORIZED, message: '邮箱或密码错误' } }, 401);
+    await recordLoginAttempt(db, email, ipAddress || '', false, userAgent);
+    const newLockoutStatus = await checkLoginLockout(db, email, ipAddress || '');
+    await createAuditLog({
+      env: c.env,
+      userId: user.id,
+      action: 'user.login',
+      resourceType: 'user',
+      status: 'failed',
+      errorMessage: '密码错误',
+      ipAddress,
+      userAgent,
+    });
+    return c.json({
+      success: false,
+      error: {
+        code: ERROR_CODES.UNAUTHORIZED,
+        message: `邮箱或密码错误，剩余尝试次数: ${newLockoutStatus.remainingAttempts}`,
+      },
+    }, 401);
   }
+
+  await recordLoginAttempt(db, email, ipAddress || '', true, userAgent);
 
   const token = await signJWT({ userId: user.id, email: user.email, role: user.role }, c.env.JWT_SECRET);
   await c.env.KV.put(`session:${token}`, JSON.stringify({ userId: user.id, email: user.email }), {
     expirationTtl: Math.floor(JWT_EXPIRY / 1000),
+  });
+
+  const deviceId = providedDeviceId || crypto.randomUUID();
+  await registerOrUpdateDevice(db, user.id, deviceId, deviceName, userAgent, ipAddress);
+
+  await createAuditLog({
+    env: c.env,
+    userId: user.id,
+    action: 'user.login',
+    resourceType: 'user',
+    resourceId: user.id,
+    details: { deviceId, deviceName },
+    ipAddress,
+    userAgent,
   });
 
   return c.json({
@@ -189,19 +342,28 @@ app.post('/login', async (c) => {
         createdAt: user.createdAt, updatedAt: user.updatedAt,
       },
       token,
+      deviceId,
     },
   });
 });
 
-// ── Logout ────────────────────────────────────────────────────────────────
 app.post('/logout', authMiddleware, async (c) => {
   const authHeader = c.req.header('Authorization');
   const token = authHeader?.slice(7);
   if (token) await c.env.KV.delete(`session:${token}`);
+
+  await createAuditLog({
+    env: c.env,
+    userId: c.get('userId'),
+    action: 'user.logout',
+    resourceType: 'user',
+    ipAddress: getClientIp(c),
+    userAgent: getUserAgent(c),
+  });
+
   return c.json({ success: true, data: { message: '已退出登录' } });
 });
 
-// ── Get current user ──────────────────────────────────────────────────────
 app.get('/me', authMiddleware, async (c) => {
   const userId = c.get('userId');
   const db = getDb(c.env.DB);
@@ -221,7 +383,6 @@ app.get('/me', authMiddleware, async (c) => {
   });
 });
 
-// ── Update profile (name + optional password change) ─────────────────────
 app.patch('/me', authMiddleware, async (c) => {
   const userId = c.get('userId')!;
   const body = await c.req.json();
@@ -245,12 +406,10 @@ app.patch('/me', authMiddleware, async (c) => {
   const now = new Date().toISOString();
   const updateData: Record<string, unknown> = { updatedAt: now };
 
-  // Update display name
   if (name !== undefined) {
     updateData.name = name || null;
   }
 
-  // Update password
   if (newPassword && currentPassword) {
     const isValid = await verifyPassword(currentPassword, user.passwordHash);
     if (!isValid) {
@@ -264,6 +423,17 @@ app.patch('/me', authMiddleware, async (c) => {
 
   await db.update(users).set(updateData).where(eq(users.id, userId));
 
+  await createAuditLog({
+    env: c.env,
+    userId,
+    action: 'user.update',
+    resourceType: 'user',
+    resourceId: userId,
+    details: { nameChanged: name !== undefined, passwordChanged: !!newPassword },
+    ipAddress: getClientIp(c),
+    userAgent: getUserAgent(c),
+  });
+
   const updated = await db.select().from(users).where(eq(users.id, userId)).get();
 
   return c.json({
@@ -276,7 +446,6 @@ app.patch('/me', authMiddleware, async (c) => {
   });
 });
 
-// ── Delete account ────────────────────────────────────────────────────────
 app.delete('/me', authMiddleware, async (c) => {
   const userId = c.get('userId')!;
   const body = await c.req.json();
@@ -300,19 +469,66 @@ app.delete('/me', authMiddleware, async (c) => {
     return c.json({ success: false, error: { code: ERROR_CODES.UNAUTHORIZED, message: '密码错误，无法注销账户' } }, 401);
   }
 
-  // Delete the user — CASCADE will remove files, shares, webdav_sessions
-  // But we need to manually clean R2 objects since that's not in the DB cascade
-  // For simplicity we soft-note this; a background job would do actual R2 cleanup
   const authHeader = c.req.header('Authorization');
   const token = authHeader?.slice(7);
   if (token) await c.env.KV.delete(`session:${token}`);
+
+  await createAuditLog({
+    env: c.env,
+    userId,
+    action: 'user.delete',
+    resourceType: 'user',
+    resourceId: userId,
+    ipAddress: getClientIp(c),
+    userAgent: getUserAgent(c),
+  });
 
   await db.delete(users).where(eq(users.id, userId));
 
   return c.json({ success: true, data: { message: '账户已注销' } });
 });
 
-// ── Stats for current user (used by dashboard) ────────────────────────────
+app.get('/devices', authMiddleware, async (c) => {
+  const userId = c.get('userId')!;
+  const db = getDb(c.env.DB);
+
+  const devices = await db.select().from(userDevices)
+    .where(eq(userDevices.userId, userId))
+    .orderBy(desc(userDevices.lastActive))
+    .all();
+
+  return c.json({ success: true, data: devices });
+});
+
+app.delete('/devices/:deviceId', authMiddleware, async (c) => {
+  const userId = c.get('userId')!;
+  const deviceId = c.req.param('deviceId');
+  const db = getDb(c.env.DB);
+
+  const device = await db.select().from(userDevices)
+    .where(and(eq(userDevices.userId, userId), eq(userDevices.deviceId, deviceId)))
+    .get();
+
+  if (!device) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '设备不存在' } }, 404);
+  }
+
+  await db.delete(userDevices).where(eq(userDevices.id, device.id));
+
+  await createAuditLog({
+    env: c.env,
+    userId,
+    action: 'user.logout',
+    resourceType: 'device',
+    resourceId: deviceId,
+    details: { deviceName: device.deviceName },
+    ipAddress: getClientIp(c),
+    userAgent: getUserAgent(c),
+  });
+
+  return c.json({ success: true, data: { message: '设备已移除' } });
+});
+
 app.get('/stats', authMiddleware, async (c) => {
   const userId = c.get('userId')!;
   const db = getDb(c.env.DB);
@@ -320,7 +536,6 @@ app.get('/stats', authMiddleware, async (c) => {
   const { isNull, isNotNull, eq: deq, and, count, sum } = await import('drizzle-orm');
   const { files } = await import('../db');
 
-  // Active files (not deleted, not folders)
   const activeFiles = await db.select().from(files)
     .where(and(deq(files.userId, userId), isNull(files.deletedAt)))
     .all();
@@ -331,13 +546,11 @@ app.get('/stats', authMiddleware, async (c) => {
     .where(and(deq(files.userId, userId), isNotNull(files.deletedAt)))
     .all().then((r) => r.length);
 
-  // Recent files (last 10, not folders)
   const recentFiles = activeFiles
     .filter((f) => !f.isFolder)
     .sort((a, b) => b.createdAt > a.createdAt ? 1 : -1)
     .slice(0, 10);
 
-  // Breakdown by type
   const typeBreakdown: Record<string, number> = {};
   for (const f of activeFiles.filter((f) => !f.isFolder)) {
     const category = f.mimeType?.startsWith('image/') ? 'image'
@@ -352,15 +565,12 @@ app.get('/stats', authMiddleware, async (c) => {
   const { users: usersTable, storageBuckets } = await import('../db');
   const userRow = await db.select().from(usersTable).where(deq(usersTable.id, userId)).get();
 
-  // Multi-bucket storage: sum all active buckets for used; use per-user quota
   const bucketRows = await db.select().from(storageBuckets)
     .where(and(deq(storageBuckets.userId, userId), deq(storageBuckets.isActive, true)))
     .all();
   const bucketStorageUsed = bucketRows.reduce((sum, b) => sum + (b.storageUsed ?? 0), 0);
-  // Use the max of user-level tracking vs bucket-level tracking (they should converge)
   const totalStorageUsed = Math.max(userRow?.storageUsed ?? 0, bucketStorageUsed);
 
-  // Per-bucket breakdown for frontend
   const bucketBreakdown = bucketRows.map((b) => ({
     id: b.id,
     name: b.name,

@@ -439,6 +439,54 @@ export async function s3CompleteMultipartUpload(
 }
 
 /**
+ * List parts that have been uploaded for a multipart upload.
+ */
+export async function s3ListParts(
+  config: S3BucketConfig,
+  key: string,
+  uploadId: string,
+): Promise<MultipartPart[]> {
+  const { url: baseUrl, host, canonicalUri } = buildObjectUrl(config, key);
+  const region = config.region || 'us-east-1';
+
+  const encodedUploadId = encodeURIComponent(uploadId);
+  const queryString = `uploadId=${encodedUploadId}`;
+  const listUrl = `${baseUrl}?${queryString}`;
+
+  const payloadHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  const signed = await signRequest({
+    method: 'GET',
+    url: listUrl,
+    host,
+    canonicalUri,
+    queryString,
+    payloadHash,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+    region,
+  });
+
+  const res = await fetch(signed.url, { method: 'GET', headers: signed.headers });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`List parts 失败 (${res.status}): ${text.slice(0, 300)}`);
+  }
+
+  const xml = await res.text();
+  const parts: MultipartPart[] = [];
+  const partRegex = /<Part>\s*<PartNumber>(\d+)<\/PartNumber>\s*<ETag>"?([^"<]+)"?<\/ETag>\s*<\/Part>/g;
+  let match;
+  while ((match = partRegex.exec(xml)) !== null) {
+    parts.push({
+      partNumber: parseInt(match[1], 10),
+      etag: match[2],
+    });
+  }
+  return parts;
+}
+
+/**
  * Abort a multipart upload (cleanup on failure).
  */
 export async function s3AbortMultipartUpload(

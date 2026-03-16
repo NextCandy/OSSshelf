@@ -30,5 +30,14 @@ id = "YOUR_KV_NAMESPACE_ID"
 ENVIRONMENT = "development"
 JWT_SECRET = "your-jwt-secret-change-in-production"
 
+# ── Cron Triggers (定时任务) ─────────────────────────────────────────────
+# 每天凌晨 3 点执行回收站清理
+[triggers]
+crons = ["0 3 * * *"]
+
 [env.production]
 vars = { ENVIRONMENT = "production", JWT_SECRET = "YOUR_JWT_SECRET" }
+
+# 生产环境 Cron 触发器
+[env.production.triggers]
+crons = ["0 3 * * *"]
