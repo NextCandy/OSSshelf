@@ -121,11 +121,13 @@ function UsersTab() {
 
   const saveEdit = () => {
     if (!editingUser) return;
+    const quotaGB = parseFloat(editForm.storageQuota);
+    const trimmedPassword = editForm.newPassword.trim();
     const data: Parameters<typeof adminApi.patchUser>[1] = {
       name: editForm.name || undefined,
       role: editForm.role,
-      storageQuota: editForm.storageQuota ? Math.round(parseFloat(editForm.storageQuota) * 1024 ** 3) : undefined,
-      newPassword: editForm.newPassword || undefined,
+      storageQuota: !isNaN(quotaGB) && editForm.storageQuota.trim() !== '' ? Math.round(quotaGB * 1024 ** 3) : undefined,
+      newPassword: trimmedPassword || undefined,
     };
     patchMutation.mutate({ id: editingUser.id, data });
   };
@@ -373,7 +375,7 @@ function RegistrationTab() {
               variant={regConfig?.requireInviteCode ? 'default' : 'outline'}
               size="sm"
               onClick={() => setRegMutation.mutate({ requireInviteCode: !regConfig?.requireInviteCode })}
-              disabled={setRegMutation.isPending}
+              disabled={setRegMutation.isPending || !regConfig?.open}
             >
               {regConfig?.requireInviteCode ? '已启用' : '已禁用'}
             </Button>

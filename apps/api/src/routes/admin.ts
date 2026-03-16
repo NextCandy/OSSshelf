@@ -145,7 +145,7 @@ app.patch('/users/:id', async (c) => {
   const { name, role, storageQuota, newPassword } = result.data;
   if (name !== undefined) updateData.name = name;
   if (role !== undefined) updateData.role = role;
-  if (storageQuota !== undefined) updateData.storageQuota = storageQuota === 0 ? null : storageQuota;
+  if (storageQuota !== undefined) updateData.storageQuota = storageQuota;
   if (newPassword) updateData.passwordHash = await hashPassword(newPassword);
 
   await db.update(users).set(updateData).where(eq(users.id, id));

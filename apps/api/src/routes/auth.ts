@@ -34,6 +34,13 @@ const loginSchema = z.object({
   password: z.string().min(1, '请输入密码'),
 });
 
+// ── GET /api/auth/registration-config (public) ─────────────────────────────
+
+app.get('/registration-config', async (c) => {
+  const config = await getRegConfig(c.env.KV);
+  return c.json({ success: true, data: config });
+});
+
 const updateProfileSchema = z.object({
   name: z.string().max(100, '昵称过长').optional(),
   currentPassword: z.string().optional(),

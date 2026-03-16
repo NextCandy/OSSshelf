@@ -53,6 +53,8 @@ export const authApi = {
     api.delete<ApiResponse<{ message: string }>>('/api/auth/me', { data: { password } }),
   stats: () =>
     api.get<ApiResponse<DashboardStats>>('/api/auth/stats'),
+  getRegistrationConfig: () =>
+    api.get<ApiResponse<{ open: boolean; requireInviteCode: boolean }>>('/api/auth/registration-config'),
 };
 
 export interface BucketStats {
