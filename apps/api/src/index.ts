@@ -22,7 +22,7 @@ app.use('*', prettyJSON());
 // which overrides CORS and causes preflight failures. We disable it explicitly.
 app.use('*', cors({
   origin: ['https://ossshelf.neutronx.uk'],
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PROPFIND', 'MKCOL', 'COPY', 'MOVE', 'HEAD'],
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'PROPFIND', 'MKCOL', 'COPY', 'MOVE', 'HEAD'],
   allowHeaders: ['Content-Type', 'Authorization', 'Depth', 'Destination', 'X-Requested-With'],
   exposeHeaders: ['Content-Length', 'Content-Range'],
   maxAge: 86400,
