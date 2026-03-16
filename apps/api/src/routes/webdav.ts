@@ -237,7 +237,7 @@ async function handlePut(c: AppContext, userId: string, path: string) {
     await db.insert(files).values({
       id: fileId, userId, parentId, name: fileName, path, type: 'file',
       size: body.byteLength, r2Key, mimeType, hash: null, isFolder: false,
-      bucketId: bucketCfgP?.id ?? null, createdAt: now, updatedAt: now,
+      bucketId: bucketCfgP?.id ?? null, createdAt: now, updatedAt: now, deletedAt: null,
     });
     if (bucketCfgP) await updateBucketStats(db, bucketCfgP.id, body.byteLength, 1);
   }
@@ -334,13 +334,21 @@ async function handleCopy(c: AppContext, userId: string, path: string) {
     if (bucketCfgC) {
       const srcRes = await s3Get(bucketCfgC, file.r2Key);
       await s3Put(bucketCfgC, newR2Key, await srcRes.arrayBuffer(), file.mimeType || 'application/octet-stream');
-      await db.insert(files).values({ id: newId, userId, parentId: file.parentId, name: newName, path: destPath, type: 'file', size: file.size, r2Key: newR2Key, mimeType: file.mimeType, hash: file.hash, isFolder: false, bucketId: file.bucketId, createdAt: now, updatedAt: now });
+      await db.insert(files).values({ 
+        id: newId, userId, parentId: file.parentId, name: newName, path: destPath, type: 'file', 
+        size: file.size, r2Key: newR2Key, mimeType: file.mimeType, hash: file.hash, 
+        isFolder: false, bucketId: file.bucketId, createdAt: now, updatedAt: now, deletedAt: null,
+      });
       await updateBucketStats(db, bucketCfgC.id, file.size, 1);
     } else if (c.env.FILES) {
       const r2Object = await c.env.FILES.get(file.r2Key);
       if (r2Object) {
         await c.env.FILES.put(newR2Key, r2Object.body, { httpMetadata: { contentType: file.mimeType || 'application/octet-stream' } });
-        await db.insert(files).values({ id: newId, userId, parentId: file.parentId, name: newName, path: destPath, type: 'file', size: file.size, r2Key: newR2Key, mimeType: file.mimeType, hash: file.hash, isFolder: false, bucketId: null, createdAt: now, updatedAt: now });
+        await db.insert(files).values({ 
+          id: newId, userId, parentId: file.parentId, name: newName, path: destPath, type: 'file', 
+          size: file.size, r2Key: newR2Key, mimeType: file.mimeType, hash: file.hash, 
+          isFolder: false, bucketId: null, createdAt: now, updatedAt: now, deletedAt: null,
+        });
       }
     }
   }
