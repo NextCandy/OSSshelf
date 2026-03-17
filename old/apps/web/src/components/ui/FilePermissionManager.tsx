@@ -8,9 +8,9 @@
  * - 支持read/write/admin权限级别
  */
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { permissionsApi, type SearchableUser } from '@/services/api';
+import { permissionsApi, adminApi } from '@/services/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/use-toast';
@@ -35,38 +35,23 @@ export function FilePermissionManager({ fileId, isOwner }: FilePermissionManager
   const [searchEmail, setSearchEmail] = useState('');
   const [selectedPermission, setSelectedPermission] = useState<'read' | 'write' | 'admin'>('read');
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
-  const [searchResults, setSearchResults] = useState<SearchableUser[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
 
   const { data: permissionData, isLoading } = useQuery({
     queryKey: ['file-permissions', fileId],
     queryFn: () => permissionsApi.getFilePermissions(fileId).then((r) => r.data.data),
   });
 
-  // 使用新的用户搜索接口
-  useEffect(() => {
-    if (!showAddForm || searchEmail.length < 2) {
-      setSearchResults([]);
-      return;
-    }
+  const { data: users = [], isLoading: isUserSearchLoading } = useQuery({
+    queryKey: ['admin', 'users'],
+    queryFn: () => adminApi.listUsers().then((r) => r.data.data ?? []),
+    enabled: showAddForm,
+  });
 
-    const timer = setTimeout(async () => {
-      setIsSearching(true);
-      try {
-        const res = await permissionsApi.searchUsers(searchEmail);
-        const users = res.data.data ?? [];
-        // 过滤掉已有权限的用户
-        const existingUserIds = new Set(permissionData?.permissions?.map((p) => p.userId) ?? []);
-        setSearchResults(users.filter((u) => !existingUserIds.has(u.id)));
-      } catch {
-        setSearchResults([]);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [searchEmail, showAddForm, permissionData?.permissions]);
+  const filteredUsers = users.filter(
+    (u) =>
+      u.email.toLowerCase().includes(searchEmail.toLowerCase()) &&
+      !permissionData?.permissions?.some((p) => p.userId === u.id)
+  );
 
   const grantMutation = useMutation({
     mutationFn: (data: { userId: string; permission: 'read' | 'write' | 'admin' }) =>
@@ -142,22 +127,9 @@ export function FilePermissionManager({ fileId, isOwner }: FilePermissionManager
             />
           </div>
 
-          {isSearching && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              搜索中...
-            </div>
-          )}
-
-          {!isSearching && searchEmail.length >= 2 && searchResults.length === 0 && (
-            <div className="text-sm text-muted-foreground py-2">
-              未找到匹配的用户
-            </div>
-          )}
-
-          {searchResults.length > 0 && (
+          {searchEmail && filteredUsers.length > 0 && (
             <div className="max-h-32 overflow-y-auto space-y-1 border rounded-lg p-1">
-              {searchResults.slice(0, 5).map((user) => (
+              {filteredUsers.slice(0, 5).map((user) => (
                 <button
                   key={user.id}
                   onClick={() => setSelectedUserId(user.id)}

@@ -10,7 +10,7 @@
  */
 
 import { Hono } from 'hono';
-import { eq, and, inArray, like } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { getDb, files, filePermissions, users, fileTags } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { ERROR_CODES } from '@osshelf/shared';
@@ -350,43 +350,6 @@ app.get('/check/:fileId', async (c) => {
       permission: result.permission,
       isOwner: result.isOwner,
     },
-  });
-});
-
-// ── 用户搜索接口（供普通用户搜索其他用户以授权）────────────────────────────────
-app.get('/users/search', async (c) => {
-  const userId = c.get('userId')!;
-  const query = c.req.query('q') || '';
-  const db = getDb(c.env.DB);
-
-  // 最少需要2个字符才能搜索
-  if (query.length < 2) {
-    return c.json({ success: true, data: [] });
-  }
-
-  // 搜索邮箱匹配的用户，排除当前用户自己
-  const matchedUsers = await db
-    .select({
-      id: users.id,
-      email: users.email,
-      name: users.name,
-      role: users.role,
-    })
-    .from(users)
-    .where(like(users.email, `%${query}%`))
-    .limit(10);
-
-  // 过滤掉当前用户
-  const filteredUsers = matchedUsers.filter((u) => u.id !== userId);
-
-  return c.json({
-    success: true,
-    data: filteredUsers.map((u) => ({
-      id: u.id,
-      email: u.email,
-      name: u.name,
-      role: u.role,
-    })),
   });
 });
 

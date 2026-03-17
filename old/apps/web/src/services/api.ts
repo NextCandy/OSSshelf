@@ -456,13 +456,6 @@ export const searchApi = {
     api.get<ApiResponse<FileItem[]>>('/api/search/recent'),
 };
 
-export interface SearchableUser {
-  id: string;
-  email: string;
-  name: string | null;
-  role: 'admin' | 'user';
-}
-
 export const permissionsApi = {
   grant: (data: { fileId: string; userId: string; permission: 'read' | 'write' | 'admin' }) =>
     api.post<ApiResponse<{ message: string }>>('/api/permissions/grant', data),
@@ -472,8 +465,6 @@ export const permissionsApi = {
     api.get<ApiResponse<{ isOwner: boolean; permissions: Array<{ id: string; userId: string; permission: string; userName: string | null; userEmail: string; createdAt: string }> }>>(`/api/permissions/file/${fileId}`),
   checkAccess: (fileId: string) =>
     api.get<ApiResponse<{ hasAccess: boolean; permission: string | null; isOwner: boolean }>>(`/api/permissions/check/${fileId}`),
-  searchUsers: (query: string) =>
-    api.get<ApiResponse<SearchableUser[]>>('/api/permissions/users/search', { params: { q: query } }),
   addTag: (data: { fileId: string; name: string; color?: string }) =>
     api.post<ApiResponse<FileTag>>('/api/permissions/tags/add', data),
   removeTag: (data: { fileId: string; tagName: string }) =>

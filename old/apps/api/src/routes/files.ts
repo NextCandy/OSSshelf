@@ -10,8 +10,8 @@
  */
 
 import { Hono } from 'hono';
-import { eq, and, isNull, isNotNull, like, or, inArray } from 'drizzle-orm';
-import { getDb, files, users, storageBuckets, filePermissions } from '../db';
+import { eq, and, isNull, isNotNull, like } from 'drizzle-orm';
+import { getDb, files, users, storageBuckets } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { ERROR_CODES, MAX_FILE_SIZE } from '@osshelf/shared';
 import type { Env, Variables } from '../types/env';
@@ -180,26 +180,11 @@ app.get('/', async (c) => {
   const sortOrder = c.req.query('sortOrder') || 'desc';
 
   const db = getDb(c.env.DB);
-
-  // 查询用户通过权限表获得授权访问的文件ID
-  const permittedFileIds = await db
-    .select({ fileId: filePermissions.fileId })
-    .from(filePermissions)
-    .where(eq(filePermissions.userId, userId))
-    .all();
-  const permittedIds = permittedFileIds.map((p) => p.fileId);
-
-  // 构建查询条件：用户自己的文件 或 被授权访问的文件
-  const ownershipCondition = or(
-    eq(files.userId, userId),
-    permittedIds.length > 0 ? inArray(files.id, permittedIds) : undefined
-  );
-
-  const conditions = [ownershipCondition, isNull(files.deletedAt)];
+  const conditions = [eq(files.userId, userId), isNull(files.deletedAt)];
   if (parentId) { conditions.push(eq(files.parentId, parentId)); } else { conditions.push(isNull(files.parentId)); }
   if (search) conditions.push(like(files.name, `%${search}%`));
 
-  const items = await db.select().from(files).where(and(...conditions.filter(Boolean) as any[])).all();
+  const items = await db.select().from(files).where(and(...conditions)).all();
   const sorted = [...items].sort((a, b) => {
     const aVal = a[sortBy] ?? ''; const bVal = b[sortBy] ?? '';
     if (sortOrder === 'asc') return aVal > bVal ? 1 : -1;
