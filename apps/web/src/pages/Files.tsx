@@ -12,7 +12,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useParams, useNavigate, useBlocker } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useFileStore, type ViewMode } from '@/stores/files';
 import { useAuthStore } from '@/stores/auth';
@@ -570,6 +570,18 @@ export default function Files() {
   });
 
   const activeUploads = Object.entries(uploadProgresses);
+  const hasActiveUploads = activeUploads.length > 0;
+
+  useEffect(() => {
+    if (hasActiveUploads) {
+      setupBeforeUnloadWarning();
+    } else {
+      removeBeforeUnloadWarning();
+    }
+    return () => {
+      removeBeforeUnloadWarning();
+    };
+  }, [hasActiveUploads]);
 
   const viewModes: { mode: ViewMode; icon: typeof List; label: string }[] = [
     { mode: 'list', icon: List, label: '列表' },

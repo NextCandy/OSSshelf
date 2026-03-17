@@ -149,7 +149,7 @@ export interface UploadTask {
   expiresAt: string;
 }
 
-export type UploadTaskStatus = 'pending' | 'uploading' | 'completed' | 'failed' | 'expired';
+export type UploadTaskStatus = 'pending' | 'uploading' | 'paused' | 'completed' | 'failed' | 'expired';
 
 export interface DownloadTask {
   id: string;
@@ -169,7 +169,7 @@ export interface DownloadTask {
   completedAt: string | null;
 }
 
-export type DownloadTaskStatus = 'pending' | 'downloading' | 'completed' | 'failed';
+export type DownloadTaskStatus = 'pending' | 'downloading' | 'paused' | 'completed' | 'failed';
 
 export interface ApiResponse<T = unknown> {
   success: boolean;

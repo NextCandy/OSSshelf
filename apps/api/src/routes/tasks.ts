@@ -39,9 +39,12 @@ const completeTaskSchema = z.object({
   taskId: z.string().min(1),
   parts: z.array(z.object({
     partNumber: z.number().int().min(1),
-    etag: z.string().min(1),
+    etag: z.string().min(1, 'etag 不能为空'),
   })).min(1),
-});
+}).refine((data) => {
+  const hasEmptyEtag = data.parts.some(p => !p.etag || p.etag.trim() === '');
+  return !hasEmptyEtag;
+}, { message: '所有分片的 etag 不能为空' });
 
 async function getUserOrFail(db: ReturnType<typeof getDb>, userId: string) {
   const user = await db.select().from(users).where(eq(users.id, userId)).get();
@@ -243,77 +246,117 @@ app.post('/complete', async (c) => {
   const db = getDb(c.env.DB);
   const encKey = c.env.JWT_SECRET || 'ossshelf-key';
 
-  const task = await db.select().from(uploadTasks)
-    .where(and(eq(uploadTasks.id, taskId), eq(uploadTasks.userId, userId)))
-    .get();
+  try {
+    const task = await db.select().from(uploadTasks)
+      .where(and(eq(uploadTasks.id, taskId), eq(uploadTasks.userId, userId)))
+      .get();
 
-  if (!task) {
-    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
-  }
+    if (!task) {
+      return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+    }
 
-  if (task.status === 'completed') {
-    return c.json({ success: true, data: { message: '任务已完成', taskId } });
-  }
+    if (task.status === 'completed') {
+      return c.json({ success: true, data: { message: '任务已完成', taskId } });
+    }
 
-  if (new Date(task.expiresAt) < new Date()) {
-    return c.json({ success: false, error: { code: ERROR_CODES.TASK_EXPIRED, message: '上传任务已过期' } }, 410);
-  }
+    if (new Date(task.expiresAt) < new Date()) {
+      return c.json({ success: false, error: { code: ERROR_CODES.TASK_EXPIRED, message: '上传任务已过期' } }, 410);
+    }
 
-  const bucketConfig = await resolveBucketConfig(db, userId, encKey, task.bucketId, task.parentId);
-  if (!bucketConfig) {
-    return c.json({ success: false, error: { code: 'NO_STORAGE', message: '存储桶配置不存在' } }, 400);
-  }
+    const bucketConfig = await resolveBucketConfig(db, userId, encKey, task.bucketId, task.parentId);
+    if (!bucketConfig) {
+      return c.json({ success: false, error: { code: 'NO_STORAGE', message: '存储桶配置不存在' } }, 400);
+    }
 
-  const fileId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const path = task.parentId ? `${task.parentId}/${task.fileName}` : `/${task.fileName}`;
+    if (!task.bucketId) {
+      return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '任务缺少存储桶ID' } }, 400);
+    }
 
-  await s3CompleteMultipartUpload(bucketConfig, task.r2Key, task.uploadId, parts as MultipartPart[]);
+    if (parts.length !== task.totalParts) {
+      console.warn(`Parts count mismatch: expected ${task.totalParts}, got ${parts.length}`);
+      return c.json({ 
+        success: false, 
+        error: { 
+          code: ERROR_CODES.VALIDATION_ERROR, 
+          message: `分片数量不匹配：期望 ${task.totalParts} 个，实际 ${parts.length} 个` 
+        } 
+      }, 400);
+    }
 
-  const { files } = await import('../db');
-  await db.insert(files).values({
-    id: fileId,
-    userId,
-    parentId: task.parentId,
-    name: task.fileName,
-    path,
-    type: 'file',
-    size: task.fileSize,
-    r2Key: task.r2Key,
-    mimeType: task.mimeType,
-    hash: null,
-    isFolder: false,
-    bucketId: task.bucketId,
-    createdAt: now,
-    updatedAt: now,
-    deletedAt: null,
-  });
+    const fileId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const path = task.parentId ? `${task.parentId}/${task.fileName}` : `/${task.fileName}`;
 
-  const user = await db.select().from(users).where(eq(users.id, userId)).get();
-  if (user) {
-    await db.update(users)
-      .set({ storageUsed: user.storageUsed + task.fileSize, updatedAt: now })
-      .where(eq(users.id, userId));
-  }
+    try {
+      await s3CompleteMultipartUpload(bucketConfig, task.r2Key, task.uploadId, parts as MultipartPart[]);
+    } catch (s3Error: any) {
+      console.error('S3 Complete Multipart Upload Error:', s3Error);
+      await db.update(uploadTasks)
+        .set({ status: 'failed', updatedAt: now })
+        .where(eq(uploadTasks.id, taskId));
+      return c.json({ 
+        success: false, 
+        error: { 
+          code: 'S3_ERROR', 
+          message: `合并分片失败: ${s3Error.message || '未知错误'}` 
+        } 
+      }, 500);
+    }
 
-  await updateBucketStats(db, task.bucketId!, task.fileSize, 1);
-
-  await db.update(uploadTasks)
-    .set({ status: 'completed', updatedAt: now })
-    .where(eq(uploadTasks.id, taskId));
-
-  return c.json({
-    success: true,
-    data: {
+    const { files } = await import('../db');
+    await db.insert(files).values({
       id: fileId,
+      userId,
+      parentId: task.parentId,
       name: task.fileName,
-      size: task.fileSize,
-      mimeType: task.mimeType,
       path,
+      type: 'file',
+      size: task.fileSize,
+      r2Key: task.r2Key,
+      mimeType: task.mimeType,
+      hash: null,
+      isFolder: false,
       bucketId: task.bucketId,
       createdAt: now,
-    },
-  });
+      updatedAt: now,
+      deletedAt: null,
+    });
+
+    const user = await db.select().from(users).where(eq(users.id, userId)).get();
+    if (user) {
+      await db.update(users)
+        .set({ storageUsed: user.storageUsed + task.fileSize, updatedAt: now })
+        .where(eq(users.id, userId));
+    }
+
+    await updateBucketStats(db, task.bucketId, task.fileSize, 1);
+
+    await db.update(uploadTasks)
+      .set({ status: 'completed', updatedAt: now })
+      .where(eq(uploadTasks.id, taskId));
+
+    return c.json({
+      success: true,
+      data: {
+        id: fileId,
+        name: task.fileName,
+        size: task.fileSize,
+        mimeType: task.mimeType,
+        path,
+        bucketId: task.bucketId,
+        createdAt: now,
+      },
+    });
+  } catch (error: any) {
+    console.error('Complete upload task error:', error);
+    return c.json({ 
+      success: false, 
+      error: { 
+        code: ERROR_CODES.INTERNAL_ERROR, 
+        message: error.message || '上传完成失败' 
+      } 
+    }, 500);
+  }
 });
 
 app.post('/abort', async (c) => {
@@ -402,6 +445,77 @@ app.get('/:taskId', async (c) => {
       uploadedParts,
     },
   });
+});
+
+app.delete('/:taskId', async (c) => {
+  const userId = c.get('userId')!;
+  const taskId = c.req.param('taskId');
+  const db = getDb(c.env.DB);
+
+  const task = await db.select().from(uploadTasks)
+    .where(and(eq(uploadTasks.id, taskId), eq(uploadTasks.userId, userId)))
+    .get();
+
+  if (!task) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+  }
+
+  await db.delete(uploadTasks).where(eq(uploadTasks.id, taskId));
+
+  return c.json({ success: true, data: { message: '任务已删除' } });
+});
+
+app.post('/:taskId/pause', async (c) => {
+  const userId = c.get('userId')!;
+  const taskId = c.req.param('taskId');
+  const db = getDb(c.env.DB);
+
+  const task = await db.select().from(uploadTasks)
+    .where(and(eq(uploadTasks.id, taskId), eq(uploadTasks.userId, userId)))
+    .get();
+
+  if (!task) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+  }
+
+  if (task.status !== 'uploading' && task.status !== 'pending') {
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '只能暂停上传中或等待中的任务' } }, 400);
+  }
+
+  await db.update(uploadTasks)
+    .set({ status: 'paused', updatedAt: new Date().toISOString() })
+    .where(eq(uploadTasks.id, taskId));
+
+  return c.json({ success: true, data: { message: '任务已暂停' } });
+});
+
+app.post('/:taskId/resume', async (c) => {
+  const userId = c.get('userId')!;
+  const taskId = c.req.param('taskId');
+  const db = getDb(c.env.DB);
+
+  const task = await db.select().from(uploadTasks)
+    .where(and(eq(uploadTasks.id, taskId), eq(uploadTasks.userId, userId)))
+    .get();
+
+  if (!task) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+  }
+
+  if (task.status !== 'paused') {
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '只能恢复已暂停的任务' } }, 400);
+  }
+
+  if (new Date(task.expiresAt) < new Date()) {
+    await db.update(uploadTasks).set({ status: 'expired', updatedAt: new Date().toISOString() }).where(eq(uploadTasks.id, taskId));
+    return c.json({ success: false, error: { code: ERROR_CODES.TASK_EXPIRED, message: '上传任务已过期' } }, 410);
+  }
+
+  await db.update(uploadTasks)
+    .set({ status: 'pending', updatedAt: new Date().toISOString() })
+    .where(eq(uploadTasks.id, taskId));
+
+  return c.json({ success: true, data: { message: '任务已恢复' } });
 });
 
 app.delete('/:taskId', async (c) => {

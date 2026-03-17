@@ -450,7 +450,16 @@ function uploadPart(
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         const etag = xhr.getResponseHeader('ETag') || xhr.getResponseHeader('etag') || '';
-        resolve(etag.replace(/"/g, '')); // strip surrounding quotes
+        const cleanEtag = etag.replace(/"/g, '');
+        if (!cleanEtag) {
+          console.error('Upload part missing ETag header:', {
+            status: xhr.status,
+            headers: xhr.getAllResponseHeaders(),
+          });
+          reject(new Error('分片上传失败：服务器未返回 ETag'));
+          return;
+        }
+        resolve(cleanEtag);
       } else {
         reject(new Error(`分片上传失败 (${xhr.status})`));
       }

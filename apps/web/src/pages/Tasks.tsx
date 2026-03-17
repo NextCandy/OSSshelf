@@ -25,6 +25,7 @@ import {
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: typeof Clock }> = {
   pending: { label: '等待中', color: 'text-amber-500', icon: Clock },
   uploading: { label: '上传中', color: 'text-blue-500', icon: Loader2 },
+  paused: { label: '已暂停', color: 'text-orange-500', icon: AlertTriangle },
   completed: { label: '已完成', color: 'text-emerald-500', icon: CheckCircle2 },
   failed: { label: '失败', color: 'text-red-500', icon: XCircle },
   expired: { label: '已过期', color: 'text-muted-foreground', icon: XCircle },
@@ -68,7 +69,33 @@ export default function Tasks() {
     }),
   });
 
-  const activeTasks = tasks.filter((t) => t.status === 'uploading' || t.status === 'pending');
+  const pauseMutation = useMutation({
+    mutationFn: (taskId: string) => tasksApi.pause(taskId),
+    onSuccess: () => {
+      toast({ title: '任务已暂停' });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: (e: any) => toast({
+      title: '暂停失败',
+      description: e.response?.data?.error?.message,
+      variant: 'destructive',
+    }),
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: (taskId: string) => tasksApi.resume(taskId),
+    onSuccess: () => {
+      toast({ title: '任务已恢复' });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: (e: any) => toast({
+      title: '恢复失败',
+      description: e.response?.data?.error?.message,
+      variant: 'destructive',
+    }),
+  });
+
+  const activeTasks = tasks.filter((t) => t.status === 'uploading' || t.status === 'pending' || t.status === 'paused');
   const completedTasks = tasks.filter((t) => t.status === 'completed' || t.status === 'failed' || t.status === 'expired');
 
   return (
@@ -111,6 +138,8 @@ export default function Tasks() {
                       task={task}
                       onAbort={() => abortMutation.mutate(task.id)}
                       onDelete={() => deleteMutation.mutate(task.id)}
+                      onPause={() => pauseMutation.mutate(task.id)}
+                      onResume={() => resumeMutation.mutate(task.id)}
                     />
                   ))}
                 </div>
@@ -166,10 +195,14 @@ function TaskItem({
   task,
   onAbort,
   onDelete,
+  onPause,
+  onResume,
 }: {
   task: UploadTask;
   onAbort?: () => void;
   onDelete: () => void;
+  onPause?: () => void;
+  onResume?: () => void;
 }) {
   const status = STATUS_CONFIG[task.status] ?? DEFAULT_STATUS;
   const progress = task.totalParts > 0
@@ -181,11 +214,11 @@ function TaskItem({
     <div className="flex items-center gap-4 p-4 rounded-lg border bg-muted/30">
       <div className={cn(
         'w-10 h-10 rounded-lg flex items-center justify-center',
-        task.status === 'uploading' ? 'bg-blue-500/10' : 'bg-muted'
+        task.status === 'uploading' ? 'bg-blue-500/10' : task.status === 'paused' ? 'bg-orange-500/10' : 'bg-muted'
       )}>
         <FileText className={cn(
           'h-5 w-5',
-          task.status === 'uploading' ? 'text-blue-500' : 'text-muted-foreground'
+          task.status === 'uploading' ? 'text-blue-500' : task.status === 'paused' ? 'text-orange-500' : 'text-muted-foreground'
         )} />
       </div>
 
@@ -202,11 +235,11 @@ function TaskItem({
           <span>{task.uploadedParts.length} / {task.totalParts} 分片</span>
           <span>{formatDate(task.createdAt)}</span>
         </div>
-        {(task.status === 'uploading' || task.status === 'pending') && (
+        {(task.status === 'uploading' || task.status === 'pending' || task.status === 'paused') && (
           <div className="mt-2">
             <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
               <div
-                className="h-full bg-primary transition-all"
+                className={cn("h-full transition-all", task.status === 'paused' ? 'bg-orange-500' : 'bg-primary')}
                 style={{ width: `${progress}%` }}
               />
             </div>
@@ -219,9 +252,27 @@ function TaskItem({
       </div>
 
       <div className="flex items-center gap-1">
+        {task.status === 'uploading' && onPause && (
+          <Button variant="outline" size="sm" onClick={onPause}>
+            <Pause className="h-3.5 w-3.5 mr-1" />
+            暂停
+          </Button>
+        )}
+        {task.status === 'pending' && onPause && (
+          <Button variant="outline" size="sm" onClick={onPause}>
+            <Pause className="h-3.5 w-3.5 mr-1" />
+            暂停
+          </Button>
+        )}
+        {task.status === 'paused' && onResume && (
+          <Button variant="outline" size="sm" onClick={onResume}>
+            <Play className="h-3.5 w-3.5 mr-1" />
+            恢复
+          </Button>
+        )}
         {task.status === 'uploading' && onAbort && (
           <Button variant="outline" size="sm" onClick={onAbort}>
-            <Pause className="h-3.5 w-3.5 mr-1" />
+            <XCircle className="h-3.5 w-3.5 mr-1" />
             取消
           </Button>
         )}

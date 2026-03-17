@@ -402,6 +402,10 @@ export const tasksApi = {
     api.post<ApiResponse<UploadedFile>>('/api/tasks/complete', data),
   abort: (taskId: string) =>
     api.post<ApiResponse<{ message: string }>>('/api/tasks/abort', { taskId }),
+  pause: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>(`/api/tasks/${taskId}/pause`),
+  resume: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>(`/api/tasks/${taskId}/resume`),
   list: () =>
     api.get<ApiResponse<UploadTask[]>>('/api/tasks/list'),
   delete: (taskId: string) =>
@@ -421,6 +425,10 @@ export const downloadsApi = {
     api.delete<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}`),
   retry: (taskId: string) =>
     api.post<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}/retry`),
+  pause: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}/pause`),
+  resume: (taskId: string) =>
+    api.post<ApiResponse<{ message: string }>>(`/api/downloads/${taskId}/resume`),
   clearCompleted: () =>
     api.delete<ApiResponse<{ message: string; count: number }>>('/api/downloads/completed'),
   clearFailed: () =>

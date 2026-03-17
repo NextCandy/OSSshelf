@@ -103,6 +103,8 @@ app.post('/create', async (c) => {
 
   c.executionCtx.waitUntil(
     (async () => {
+      let downloadedBytes = 0;
+      let totalSize = 0;
       try {
         await db.update(downloadTasks)
           .set({ status: 'downloading', updatedAt: new Date().toISOString() })
@@ -142,35 +144,43 @@ app.post('/create', async (c) => {
           throw new Error('无法读取响应内容');
         }
 
-        const chunks: Uint8Array[] = [];
-        let downloadedBytes = 0;
+        const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = writable.getWriter();
+
+        const uploadPromise = (async () => {
+          const fileId = crypto.randomUUID();
+          const r2Key = `files/${userId}/${fileId}/${resolvedFileName}`;
+          const path = parentId ? `${parentId}/${resolvedFileName}` : `/${resolvedFileName}`;
+
+          await s3Put(bucketConfig, r2Key, readable, contentType);
+
+          return { fileId, r2Key, path };
+        })();
+
+        let lastProgressUpdate = Date.now();
+        const PROGRESS_UPDATE_INTERVAL = 1000;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          chunks.push(value);
+          await writer.write(value);
           downloadedBytes += value.length;
 
-          const progress = fileSize > 0 ? Math.round((downloadedBytes / fileSize) * 100) : 0;
-          await db.update(downloadTasks)
-            .set({ progress, fileSize: downloadedBytes, updatedAt: new Date().toISOString() })
-            .where(eq(downloadTasks.id, taskId));
+          const now = Date.now();
+          if (now - lastProgressUpdate >= PROGRESS_UPDATE_INTERVAL) {
+            const progress = fileSize > 0 ? Math.round((downloadedBytes / fileSize) * 100) : 0;
+            await db.update(downloadTasks)
+              .set({ progress, fileSize: downloadedBytes, updatedAt: new Date().toISOString() })
+              .where(eq(downloadTasks.id, taskId));
+            lastProgressUpdate = now;
+          }
         }
 
-        const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-        const fileContent = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const chunk of chunks) {
-          fileContent.set(chunk, offset);
-          offset += chunk.length;
-        }
+        await writer.close();
+        totalSize = downloadedBytes;
 
-        const fileId = crypto.randomUUID();
-        const r2Key = `files/${userId}/${fileId}/${resolvedFileName}`;
-        const path = parentId ? `${parentId}/${resolvedFileName}` : `/${resolvedFileName}`;
-
-        await s3Put(bucketConfig, r2Key, fileContent, contentType);
+        const { fileId, r2Key, path } = await uploadPromise;
 
         await db.insert(files).values({
           id: fileId,
@@ -211,6 +221,7 @@ app.post('/create', async (c) => {
           .set({
             status: 'failed',
             errorMessage,
+            fileSize: downloadedBytes || null,
             updatedAt: new Date().toISOString(),
           })
           .where(eq(downloadTasks.id, taskId));
@@ -414,6 +425,61 @@ app.post('/:taskId/retry', async (c) => {
     .where(eq(downloadTasks.id, taskId));
 
   return c.json({ success: true, data: { message: '任务已重新排队' } });
+});
+
+app.post('/:taskId/pause', async (c) => {
+  const userId = c.get('userId')!;
+  const taskId = c.req.param('taskId');
+  const db = getDb(c.env.DB);
+
+  const task = await db.select().from(downloadTasks)
+    .where(and(eq(downloadTasks.id, taskId), eq(downloadTasks.userId, userId)))
+    .get();
+
+  if (!task) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+  }
+
+  if (task.status !== 'downloading' && task.status !== 'pending') {
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '只能暂停下载中或等待中的任务' } }, 400);
+  }
+
+  await db.update(downloadTasks)
+    .set({
+      status: 'paused',
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(downloadTasks.id, taskId));
+
+  return c.json({ success: true, data: { message: '任务已暂停' } });
+});
+
+app.post('/:taskId/resume', async (c) => {
+  const userId = c.get('userId')!;
+  const taskId = c.req.param('taskId');
+  const db = getDb(c.env.DB);
+
+  const task = await db.select().from(downloadTasks)
+    .where(and(eq(downloadTasks.id, taskId), eq(downloadTasks.userId, userId)))
+    .get();
+
+  if (!task) {
+    return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '任务不存在' } }, 404);
+  }
+
+  if (task.status !== 'paused') {
+    return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '只能恢复已暂停的任务' } }, 400);
+  }
+
+  await db.update(downloadTasks)
+    .set({
+      status: 'pending',
+      errorMessage: null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(downloadTasks.id, taskId));
+
+  return c.json({ success: true, data: { message: '任务已恢复' } });
 });
 
 export default app;
