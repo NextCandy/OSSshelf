@@ -43,6 +43,7 @@ import {
   Image as ImageIcon, FolderInput, Database, MoreVertical,
   Copy, Scissors, Clipboard, RefreshCw, Columns, LayoutGrid,
   CheckCircle2, Tag, AlertTriangle, Shield, Settings, SlidersHorizontal,
+  User,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import type { FileItem } from '@osshelf/shared';
@@ -1280,6 +1281,23 @@ function ListItem({ file, isSelected, tags, onClick, onToggleSelect, onDownload,
               {(file as any).bucket.name}
             </span>
           )}
+          {(file as any).owner && !(file as any).isOwner && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+              <User className="h-2.5 w-2.5" />
+              {(file as any).owner.name || (file as any).owner.email}
+            </span>
+          )}
+          {(file as any).accessPermission && !(file as any).isOwner && (
+            <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
+              (file as any).accessPermission === 'admin' 
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 border-purple-200 dark:border-purple-800'
+                : (file as any).accessPermission === 'write'
+                ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border-amber-200 dark:border-amber-800'
+                : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 border-blue-200 dark:border-blue-800'
+            }`}>
+              {(file as any).accessPermission === 'admin' ? '管理' : (file as any).accessPermission === 'write' ? '读写' : '只读'}
+            </span>
+          )}
         </p>
       </div>
       <div className={cn(
@@ -1331,6 +1349,12 @@ function GridItem({ file, isSelected, token, tags, onClick, onToggleSelect, onDo
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-medium bg-muted border">
               <Database className="h-2 w-2" />
               {(file as any).bucket.name}
+            </span>
+          )}
+          {(file as any).owner && !(file as any).isOwner && (
+            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+              <User className="h-2 w-2" />
+              {(file as any).owner.name || (file as any).owner.email}
             </span>
           )}
         </div>

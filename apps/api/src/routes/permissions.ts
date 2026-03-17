@@ -50,7 +50,7 @@ async function checkFileOwnership(db: ReturnType<typeof getDb>, fileId: string, 
   return file;
 }
 
-async function checkFilePermission(
+export async function checkFilePermission(
   db: ReturnType<typeof getDb>,
   fileId: string,
   userId: string,

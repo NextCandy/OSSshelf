@@ -10,8 +10,9 @@
  */
 
 import { Hono } from 'hono';
-import { eq, and, isNull, isNotNull, like, or, inArray } from 'drizzle-orm';
+import { eq, and, isNull, isNotNull, like, or, inArray, sql } from 'drizzle-orm';
 import { getDb, files, users, storageBuckets, filePermissions } from '../db';
+import { checkFilePermission } from './permissions';
 import { authMiddleware } from '../middleware/auth';
 import { ERROR_CODES, MAX_FILE_SIZE } from '@osshelf/shared';
 import type { Env, Variables } from '../types/env';
@@ -213,7 +214,30 @@ app.get('/', async (c) => {
     if (b) bucketMap[b.id] = { id: b.id, name: b.name, provider: b.provider };
   }
 
-  const withBucket = sorted.map((f) => ({ ...f, bucket: f.bucketId ? (bucketMap[f.bucketId] ?? null) : null }));
+  // 获取文件归属人信息（用于显示共享文件的owner）
+  const ownerIds = [...new Set(sorted.map((f) => f.userId).filter(Boolean))] as string[];
+  const ownerMap: Record<string, { id: string; name: string | null; email: string }> = {};
+  for (const oid of ownerIds) {
+    const u = await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, oid)).get();
+    if (u) ownerMap[u.id] = u;
+  }
+
+  // 获取当前用户对每个文件的权限信息
+  const permissionsMap: Record<string, { permission: string | null; isOwner: boolean }> = {};
+  for (const file of sorted) {
+    permissionsMap[file.id] = {
+      permission: file.userId === userId ? 'admin' : (permittedIds.includes(file.id) ? 'read' : null),
+      isOwner: file.userId === userId,
+    };
+  }
+
+  const withBucket = sorted.map((f) => ({
+    ...f,
+    bucket: f.bucketId ? (bucketMap[f.bucketId] ?? null) : null,
+    owner: ownerMap[f.userId] ?? null,
+    accessPermission: permissionsMap[f.id]?.permission,
+    isOwner: permissionsMap[f.id]?.isOwner,
+  }));
   return c.json({ success: true, data: withBucket });
 });
 
@@ -307,14 +331,30 @@ app.post('/', async (c) => {
 app.get('/:id', async (c) => {
   const userId = c.get('userId')!; const fileId = c.req.param('id');
   const db = getDb(c.env.DB);
-  const file = await db.select().from(files).where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
+
+  // 使用权限检查函数，允许被授权的用户访问
+  const { hasAccess, isOwner } = await checkFilePermission(db, fileId, userId, 'read');
+  if (!hasAccess) {
+    return c.json({ success: false, error: { code: ERROR_CODES.FORBIDDEN, message: '无权访问此文件' } }, 403);
+  }
+
+  const file = await db.select().from(files).where(eq(files.id, fileId)).get();
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
+
   let bucketInfo: { id: string; name: string; provider: string } | null = null;
   if (file.bucketId) {
     const b = await db.select().from(storageBuckets).where(eq(storageBuckets.id, file.bucketId)).get();
     if (b) bucketInfo = { id: b.id, name: b.name, provider: b.provider };
   }
-  return c.json({ success: true, data: { ...file, bucket: bucketInfo } });
+
+  // 获取归属人信息
+  let ownerInfo = null;
+  if (!isOwner && file.userId) {
+    const owner = await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, file.userId)).get();
+    if (owner) ownerInfo = owner;
+  }
+
+  return c.json({ success: true, data: { ...file, bucket: bucketInfo, owner: ownerInfo, isOwner } });
 });
 
 // ── Update ─────────────────────────────────────────────────────────────────
@@ -323,13 +363,35 @@ app.put('/:id', async (c) => {
   const body = await c.req.json(); const result = updateFileSchema.safeParse(body);
   if (!result.success) return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: result.error.errors[0].message } }, 400);
   const db = getDb(c.env.DB);
-  const file = await db.select().from(files).where(and(eq(files.id, fileId), eq(files.userId, userId))).get();
+
+  // 使用权限检查函数，需要 write 权限
+  const { hasAccess, isOwner } = await checkFilePermission(db, fileId, userId, 'write');
+  if (!hasAccess) {
+    return c.json({ success: false, error: { code: ERROR_CODES.FORBIDDEN, message: '无权修改此文件' } }, 403);
+  }
+
+  const file = await db.select().from(files).where(eq(files.id, fileId)).get();
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
+
+  // 非所有者只能修改名称，不能移动位置
   const { name, parentId } = result.data;
   const now = new Date().toISOString();
   const updateData: Record<string, unknown> = { updatedAt: now };
-  if (name) { updateData.name = name; updateData.path = parentId !== undefined ? (parentId ? `${parentId}/${name}` : `/${name}`) : (file.parentId ? `${file.parentId}/${name}` : `/${name}`); }
-  if (parentId !== undefined) { updateData.parentId = parentId || null; const n = (name as string | undefined) || file.name; updateData.path = parentId ? `${parentId}/${n}` : `/${n}`; }
+
+  if (name) {
+    updateData.name = name;
+    updateData.path = parentId !== undefined
+      ? (parentId ? `${parentId}/${name}` : `/${name}`)
+      : (file.parentId ? `${file.parentId}/${name}` : `/${name}`);
+  }
+
+  // 只有所有者可以移动文件位置
+  if (parentId !== undefined && isOwner) {
+    updateData.parentId = parentId || null;
+    const n = (name as string | undefined) || file.name;
+    updateData.path = parentId ? `${parentId}/${n}` : `/${n}`;
+  }
+
   await db.update(files).set(updateData).where(eq(files.id, fileId));
   return c.json({ success: true, data: { message: '更新成功' } });
 });
@@ -388,7 +450,14 @@ app.post('/:id/move', async (c) => {
 app.delete('/:id', async (c) => {
   const userId = c.get('userId')!; const fileId = c.req.param('id');
   const db = getDb(c.env.DB);
-  const file = await db.select().from(files).where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
+
+  // 使用权限检查函数，需要 admin 权限才能删除
+  const { hasAccess } = await checkFilePermission(db, fileId, userId, 'admin');
+  if (!hasAccess) {
+    return c.json({ success: false, error: { code: ERROR_CODES.FORBIDDEN, message: '无权删除此文件' } }, 403);
+  }
+
+  const file = await db.select().from(files).where(and(eq(files.id, fileId), isNull(files.deletedAt))).get();
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   const now = new Date().toISOString();
   if (file.isFolder) await softDeleteFolder(db, fileId, now);
@@ -405,10 +474,17 @@ async function softDeleteFolder(db: ReturnType<typeof getDb>, folderId: string, 
 app.get('/:id/download', async (c) => {
   const userId = c.get('userId')!; const fileId = c.req.param('id');
   const db = getDb(c.env.DB); const encKey = c.env.JWT_SECRET || 'ossshelf-key';
-  const file = await db.select().from(files).where(and(eq(files.id, fileId), eq(files.userId, userId), isNull(files.deletedAt))).get();
+
+  // 使用权限检查函数，需要 read 权限
+  const { hasAccess } = await checkFilePermission(db, fileId, userId, 'read');
+  if (!hasAccess) {
+    return c.json({ success: false, error: { code: ERROR_CODES.FORBIDDEN, message: '无权下载此文件' } }, 403);
+  }
+
+  const file = await db.select().from(files).where(and(eq(files.id, fileId), isNull(files.deletedAt))).get();
   if (!file) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件不存在' } }, 404);
   if (file.isFolder) return c.json({ success: false, error: { code: ERROR_CODES.VALIDATION_ERROR, message: '无法下载文件夹' } }, 400);
-  const bucketConfig = await resolveBucketConfig(db, userId, encKey, file.bucketId, file.parentId);
+  const bucketConfig = await resolveBucketConfig(db, file.userId, encKey, file.bucketId, file.parentId);
   const dlHeaders = { 'Content-Type': file.mimeType || 'application/octet-stream', 'Content-Disposition': `attachment; filename="${encodeURIComponent(file.name)}"`, 'Content-Length': file.size.toString() };
   if (bucketConfig) { const s3Res = await s3Get(bucketConfig, file.r2Key); return new Response(s3Res.body, { headers: dlHeaders }); }
   if (c.env.FILES) { const obj = await c.env.FILES.get(file.r2Key); if (!obj) return c.json({ success: false, error: { code: ERROR_CODES.NOT_FOUND, message: '文件内容不存在' } }, 404); return new Response(obj.body, { headers: dlHeaders }); }
