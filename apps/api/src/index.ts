@@ -33,13 +33,36 @@ import type { Env } from './types/env';
 
 const app = new Hono<{ Bindings: Env }>();
 
+function resolveCorsOrigin(origin: string | undefined, env: Env): string {
+  const configuredOrigins = (env.CORS_ORIGINS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const fallbackOrigins = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+    'https://der.cc',
+    'https://www.der.cc',
+    'https://api.der.cc',
+  ];
+  const allowedOrigins = [...new Set([...fallbackOrigins, ...configuredOrigins])];
+
+  if (origin && allowedOrigins.includes(origin)) {
+    return origin;
+  }
+
+  return configuredOrigins[0] || fallbackOrigins[0];
+}
+
 app.use('*', logger());
 app.use('*', prettyJSON());
 app.use('*', cors({
-  origin: ['https://ossshelf.neutronx.uk'],
-  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'PROPFIND', 'MKCOL', 'COPY', 'MOVE', 'HEAD'],
-  allowHeaders: ['Content-Type', 'Authorization', 'Depth', 'Destination', 'X-Requested-With'],
-  exposeHeaders: ['Content-Length', 'Content-Range'],
+  origin: (origin, c) => resolveCorsOrigin(origin, c.env),
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'PROPFIND', 'MKCOL', 'COPY', 'MOVE', 'HEAD', 'LOCK', 'UNLOCK'],
+  allowHeaders: ['Content-Type', 'Authorization', 'Depth', 'Destination', 'X-Requested-With', 'Accept', 'Origin', 'Cache-Control', 'Lock-Token', 'If', 'Overwrite', 'Timeout'],
+  exposeHeaders: ['Content-Length', 'Content-Range', 'ETag', 'DAV', 'Lock-Token'],
   maxAge: 86400,
   credentials: true,
 }));

@@ -5,6 +5,7 @@ export interface Env {
   FILES?: R2Bucket;  // Legacy direct R2 binding — optional, use storageBuckets instead
   KV: KVNamespace;
   ENVIRONMENT: string;
+  CORS_ORIGINS?: string;
   JWT_SECRET: string;
 }
 

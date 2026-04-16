@@ -29,6 +29,8 @@ id = "YOUR_KV_NAMESPACE_ID"
 [vars]
 ENVIRONMENT = "development"
 JWT_SECRET = "your-jwt-secret-change-in-production"
+CORS_ORIGINS = "https://der.cc,https://www.der.cc,https://api.der.cc"
+TRASH_RETENTION_DAYS = "30"
 
 # ── Cron Triggers (定时任务) ─────────────────────────────────────────────
 # 每天凌晨 3 点执行回收站清理
@@ -36,7 +38,7 @@ JWT_SECRET = "your-jwt-secret-change-in-production"
 crons = ["0 3 * * *"]
 
 [env.production]
-vars = { ENVIRONMENT = "production", JWT_SECRET = "YOUR_JWT_SECRET" }
+vars = { ENVIRONMENT = "production", CORS_ORIGINS = "https://der.cc,https://www.der.cc,https://api.der.cc", TRASH_RETENTION_DAYS = "30" }
 
 # 生产环境 Cron 触发器
 [env.production.triggers]

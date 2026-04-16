@@ -103,21 +103,5 @@
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
-    
-    <!-- Register Service Worker -->
-    <script>
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', function() {
-          navigator.serviceWorker.register('/sw.js').then(
-            function(registration) {
-              console.log('SW registered: ', registration.scope);
-            },
-            function(error) {
-              console.log('SW registration failed: ', error);
-            }
-          );
-        });
-      }
-    </script>
   </body>
 </html>

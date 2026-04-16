@@ -8,9 +8,9 @@
  * - 后台同步
  */
 
-const CACHE_NAME = 'osshelf-v1';
-const STATIC_CACHE_NAME = 'osshelf-static-v1';
-const DYNAMIC_CACHE_NAME = 'osshelf-dynamic-v1';
+const CACHE_NAME = 'osshelf-v3';
+const STATIC_CACHE_NAME = 'osshelf-static-v3';
+const DYNAMIC_CACHE_NAME = 'osshelf-dynamic-v3';
 
 const STATIC_ASSETS = [
   '/',
@@ -97,15 +97,16 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (url.origin === location.origin) {
-    if (request.destination === 'document') {
+    if (
+      request.destination === 'document' ||
+      request.destination === 'style' ||
+      request.destination === 'script'
+    ) {
       event.respondWith(networkFirst(request));
       return;
     }
-    
-    if (request.destination === 'style' || 
-        request.destination === 'script' ||
-        request.destination === 'image' ||
-        request.destination === 'font') {
+
+    if (request.destination === 'image' || request.destination === 'font') {
       event.respondWith(staleWhileRevalidate(request));
       return;
     }
