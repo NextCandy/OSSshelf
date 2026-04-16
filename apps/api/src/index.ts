@@ -32,6 +32,9 @@ import { runAllCleanupTasks } from './lib/cleanup';
 import type { Env } from './types/env';
 
 const app = new Hono<{ Bindings: Env }>();
+const FRONTEND_ORIGIN = 'https://ossshelf-web-13x.pages.dev';
+const FRONTEND_HOSTS = new Set(['der.cc', 'www.der.cc']);
+const BACKEND_PATH_PREFIXES = ['/api', '/dav', '/cron', '/health'];
 
 function resolveCorsOrigin(origin: string | undefined, env: Env): string {
   const configuredOrigins = (env.CORS_ORIGINS || '')
@@ -69,6 +72,20 @@ app.use('*', cors({
 app.use('*', secureHeaders({
   crossOriginResourcePolicy: false,
 }));
+
+app.use('*', async (c, next) => {
+  const url = new URL(c.req.url);
+  const isFrontendHost = FRONTEND_HOSTS.has(url.hostname);
+  const isBackendPath = BACKEND_PATH_PREFIXES.some((prefix) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`));
+
+  if (!isFrontendHost || isBackendPath) {
+    return next();
+  }
+
+  const proxyUrl = new URL(url.pathname + url.search, FRONTEND_ORIGIN);
+  const response = await fetch(new Request(proxyUrl.toString(), c.req.raw));
+  return response;
+});
 
 app.use('*', errorHandler);
 
